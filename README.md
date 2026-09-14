@@ -59,6 +59,12 @@ uv run bunbird inspect <完整任务ID>
 uv run bunbird cancel <完整任务ID>
 ```
 
+## MiniMax / Anthropic 协议
+
+MiniMax 的 Anthropic 兼容接口使用 `MODEL_MODE=anthropic`、`MODEL_BASE_URL=https://api.minimaxi.com/anthropic`、`MODEL_NAME=MiniMax-M3`，密钥只填写在本地 `.env` 的 `MODEL_API_KEY`。程序调用 `/v1/messages`，只提取正文文本，不发送模型返回的思考块。其他支持聊天补全的服务仍使用 `MODEL_MODE=compatible`。修改后重启 Worker。
+
+CC Switch 中的模型别名、`[1M]` 后缀和 Claude Code 专属开关不直接传给模型接口；本版固定使用配置的一个模型，并保留原任务时限和上下文预算。
+
 ## 消息状态表情
 
 机器人会在你发出的原消息上依次显示“思考”（等待模型生成）、“敲键盘”（准备发送答案）、“完成”（成功答案已发送）。失败和取消只清除处理中表情，不显示完成；不会读取或展示模型私有推理。模拟模式执行较快，中间表情可能很短暂。

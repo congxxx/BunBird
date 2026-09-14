@@ -32,6 +32,53 @@ def test_model_request_and_usage_contract():
     assert json.loads(answer["usageJson"])["total_tokens"] == 20
 
 
+def test_anthropic_request_and_text_only_response():
+    def handler(request):
+        assert str(request.url) == "https://model.test/anthropic/v1/messages"
+        assert request.headers["x-api-key"] == "test-key"
+        body = json.loads(request.content)
+        assert isinstance(body["system"], str)
+        assert body["messages"] == [{"role": "user", "content": "问题"}]
+        return httpx.Response(
+            200,
+            json={
+                "type": "message",
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "private reasoning"},
+                    {"type": "text", "text": "回答"},
+                ],
+                "usage": {"input_tokens": 20, "output_tokens": 10},
+            },
+        )
+
+    model = Model(
+        ModelConfig("anthropic", "MiniMax-M3", "https://model.test/anthropic", "test-key"),
+        httpx.MockTransport(handler),
+    )
+    answer = asyncio.run(model.answer(job()))
+    assert answer["result"] == "回答"
+    assert "private reasoning" not in json.dumps(answer)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"content": [{"type": "thinking", "thinking": "internal"}], "stop_reason": "end_turn"},
+        {"content": [{"type": "text", "text": "partial"}], "stop_reason": "max_tokens"},
+        {"content": [{"type": "tool_use", "name": "shell"}]},
+        {"type": "error", "error": {"message": "private provider detail"}},
+    ],
+)
+def test_anthropic_incomplete_or_unsupported_result_fails(body):
+    model = Model(
+        ModelConfig("anthropic", "test", "https://model.test/anthropic", "key"),
+        httpx.MockTransport(lambda _: httpx.Response(200, json=body)),
+    )
+    with pytest.raises(ModelError):
+        asyncio.run(model.answer(job()))
+
+
 @pytest.mark.parametrize(
     "body",
     [

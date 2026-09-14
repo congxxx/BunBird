@@ -34,8 +34,8 @@ class ModelConfig:
         mode = os.getenv("MODEL_MODE", "compatible")
         if mode == "mock":
             return cls("mock", "mock-demo", "", "")
-        if mode != "compatible":
-            raise ValueError("MODEL_MODE 仅支持 compatible 或 mock")
+        if mode not in {"compatible", "anthropic"}:
+            raise ValueError("MODEL_MODE 仅支持 compatible、anthropic 或 mock")
         url = required("MODEL_BASE_URL").rstrip("/")
         if not url.startswith(("http://", "https://")):
             raise ValueError("MODEL_BASE_URL 必须是 HTTP(S) 地址")
@@ -80,15 +80,24 @@ class Model:
         ) as http:
             for attempt in range(3):
                 try:
+                    conversation = messages(job)
+                    headers = {"Authorization": f"Bearer {self.config.key}"}
+                    payload = {
+                        "model": self.config.name,
+                        "messages": conversation,
+                        "max_tokens": 2048,
+                        "stream": False,
+                    }
+                    endpoint = "/chat/completions"
+                    if self.config.mode == "anthropic":
+                        endpoint = "/v1/messages"
+                        headers = {"x-api-key": self.config.key, "anthropic-version": "2023-06-01"}
+                        payload["system"] = conversation[0]["content"]
+                        payload["messages"] = conversation[1:]
                     response = await http.post(
-                        self.config.url + "/chat/completions",
-                        headers={"Authorization": f"Bearer {self.config.key}"},
-                        json={
-                            "model": self.config.name,
-                            "messages": messages(job),
-                            "max_tokens": 2048,
-                            "stream": False,
-                        },
+                        self.config.url + endpoint,
+                        headers=headers,
+                        json=payload,
                     )
                     if response.status_code == 429 or response.status_code >= 500:
                         raise ModelError("MODEL_TEMPORARY")
@@ -96,7 +105,22 @@ class Model:
                         raise ModelError(f"MODEL_HTTP_{response.status_code}")
                     try:
                         body = response.json()
-                        choice = body["choices"][0]
+                        if self.config.mode == "anthropic":
+                            if (
+                                body.get("type") == "error"
+                                or body.get("base_resp", {}).get("status_code", 0) != 0
+                            ):
+                                raise ModelError("MODEL_PROVIDER_ERROR")
+                            if body.get("stop_reason") == "max_tokens":
+                                raise ModelError("MODEL_OUTPUT_TRUNCATED")
+                            blocks = body["content"]
+                            if any(b.get("type") == "tool_use" for b in blocks):
+                                raise ModelError("MODEL_INVALID_RESPONSE")
+                            # Reasoning blocks never enter replies or conversation history.
+                            text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+                            choice = {"message": {"content": text}}
+                        else:
+                            choice = body["choices"][0]
                         if choice.get("finish_reason") == "length":
                             raise ModelError("MODEL_OUTPUT_TRUNCATED")
                         text = choice["message"].get("content")
