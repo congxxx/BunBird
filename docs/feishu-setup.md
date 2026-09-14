@@ -1,0 +1,49 @@
+# 飞书 / Lark 接入
+
+## 应用准备
+
+在 [飞书开发者后台](https://open.feishu.cn/app) 创建企业自建应用，开启“机器人”能力，取得 App ID、App Secret。群中的自定义 Webhook 机器人不支持本项目需要的用户消息事件，必须使用应用机器人。国际版 Lark 使用对应开发者后台，并将 `FEISHU_DOMAIN` 改为 `https://open.larksuite.com`。
+
+将应用可用范围限定到试点人员，在权限管理中申请下列应用身份权限，并确保发布的版本已经生效：
+
+| 权限标识 | 用途 |
+| --- | --- |
+| `im:message.p2p_msg:readonly` | 接收用户发给机器人的单聊消息 |
+| `im:message.group_msg` | 接收机器人所在群的全部用户消息（免 @ 必需，敏感权限） |
+| `im:message:send_as_bot` | 以机器人身份发送回复 |
+| `im:message.reactions:read` | 核对本机器人已有的状态表情 |
+| `im:message.reactions:write_only` | 添加和移除状态表情 |
+
+以后台当前显示的权限名称和审批要求为准，接收事件所需权限和回复接口所需权限分别配置。免 @ 模式需要读取全部群消息的权限；不需要通讯录、文档、云盘或多维表格权限。
+
+将当前企业的 `tenant_key` 填入 `.env` 的 `FEISHU_TENANT_KEY`。可通过开发者 API 调试台调用“获取企业信息”接口 `/open-apis/tenant/v2/tenant/query` 获取，具体权限按该接口页面提示；也可使用管理员提供的、已确认属于当前应用企业的 tenant_key。不要根据企业显示名称或用户姓名猜测。程序同时核对事件所属企业和发送者所属企业，外部企业成员不进入本版的执行队列。
+
+## 长连接与事件订阅
+
+本项目使用官方 SDK 的 `lark.ws.Client` 与 `EventDispatcherHandler`。在“事件与回调”中选择使用长连接接收事件，添加 **接收消息** 事件 `im.message.receive_v1`。它是事件名称，不是权限名称；不要把它粘到权限搜索中。
+
+如果后台提示没有建立长连接，先填写 `.env` 并启动 `uv run bunbird bridge`，待连接建立后再保存事件配置。配置长连接无需填写公网请求地址，长连接链路由应用凭据鉴权，因此这里没有自建 Webhook 验签入口。启动时连接器通过官方 API 获取机器人的真实 `open_id`，群里直接接收普通用户消息，@机器人会从提问文本中去掉，@其他人则保留为普通文本；机器人消息不触发，避免循环回复。
+
+创建并发布应用版本，确认权限和可用范围生效；把机器人加入测试群，或从应用入口打开私聊。建议 `.env` 中的 `FEISHU_ALLOWED_CHAT_IDS` 只配置测试聊天 ID，多个值用逗号分隔；留空时允许当前已配置企业内符合事件范围的聊天。
+
+## 验收步骤
+
+1. 保持 `MODEL_MODE=mock`，启动管理服务、Worker 和连接器；在私聊发送 `/help`，应收到帮助说明。
+2. 发送“你好”，应先收到任务 ID，再收到明确标注演示模式的回复。到群里直接发送文字，确认不 @机器人也能触发。
+3. 设置真实模型的 API 地址、型号和密钥，切换 `MODEL_MODE=compatible` 并重启 Worker。发送一个简短问题，确认得到模型回答。
+4. 回复同一话题发送后续问题，确认上下文连续；新根消息应形成独立群话题。
+5. 在排队或运行时用 `/cancel 完整任务ID` 取消。Worker 最多每三秒检查一次服务端状态，取消后不会提交迟到答案；第三方模型服务是否停止计费取决于服务商对连接中断的处理。
+
+这些是交给应用管理员操作的真实联调步骤，项目的自动化验证不会代替你发布应用、发消息或声称已经通过真实飞书验收。
+
+## 排查
+
+没有收到消息时，依次检查应用版本、可用范围、机器人是否在群中、是否已开通并发布 `im:message.group_msg`、三个应用身份权限、接收消息事件、长连接状态以及企业/聊天白名单。应用凭据属于不同企业或国际版域名不对应时，启动或事件过滤会失败。
+
+收到了任务 ID 但没有答案时，用 `uv run bunbird inspect 任务ID` 查询。`QUEUED` 通常表示 Worker 未启动或同话题前一任务仍执行；`FAILED` 的 `error_code` 区分模型鉴权、限流、网络、响应格式、截断或执行租约问题。任务成功但未送达时查询 `/api/tasks/{id}/deliveries`，该问题只影响发送队列，不会重跑模型。最后一次发送失败保留为 `FAILED`，排查权限或消息是否已删除后由后续版本的人工补发能力处理；本版不会无限重试。
+
+保持连接器的数据目录/持久卷，管理服务短暂离线时事件在这里等待补交。一个应用建议只运行一个连接器实例；不要同时为同一个机器人启动本地和 Compose 连接器。SDK 长连接收到的事件不应用于互不相干的调试程序，否则平台的多连接分发可能让其他程序消费消息。
+
+## 官方参考
+
+实现核对了 [Python SDK 官方仓库](https://github.com/larksuite/oapi-sdk-python)及安装的 1.7.3 源码中的 WebSocket、事件分发、回复请求模型；事件与权限配置参见 [接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)，订阅方式参见 [配置事件订阅方式](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)，回复参见 [回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)。官网部分页面为动态加载，真实应用权限仍需在后台按当前接口要求确认。

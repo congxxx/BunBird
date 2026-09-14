@@ -1,0 +1,18 @@
+server:
+  address: ${BIND_ADDRESS:127.0.0.1}
+  port: ${PORT:8080}
+  error:
+    include-message: never
+spring:
+  datasource:
+    url: ${DATABASE_URL:jdbc:h2:file:./data/bunbird;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE}
+    username: ${DATABASE_USER:sa}
+    password: ${DATABASE_PASSWORD:}
+  jackson:
+    default-property-inclusion: non_null
+bunbird:
+  tenant: ${FEISHU_TENANT_KEY}
+  app-id: ${FEISHU_APP_ID}
+  bridge-token: ${BUNBIRD_BRIDGE_TOKEN}
+  worker-token: ${BUNBIRD_WORKER_TOKEN}
+  admin-token: ${BUNBIRD_ADMIN_TOKEN}

@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_DB: bunbird
+      POSTGRES_USER: bunbird
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Run scripts/init_env.py first}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U bunbird -d bunbird]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+  control:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      BIND_ADDRESS: 0.0.0.0
+      DATABASE_URL: jdbc:postgresql://postgres:5432/bunbird
+      DATABASE_USER: bunbird
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Required}
+      FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Required}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:?Required}
+      BUNBIRD_BRIDGE_TOKEN: ${BUNBIRD_BRIDGE_TOKEN:?Required}
+      BUNBIRD_WORKER_TOKEN: ${BUNBIRD_WORKER_TOKEN:?Required}
+      BUNBIRD_ADMIN_TOKEN: ${BUNBIRD_ADMIN_TOKEN:?Required}
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: [worker]
+    environment:
+      BUNBIRD_CONTROL_URL: http://control:8080
+      BUNBIRD_WORKER_TOKEN: ${BUNBIRD_WORKER_TOKEN:?Required}
+      MODEL_MODE: ${MODEL_MODE:-mock}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+    depends_on:
+      - control
+    restart: unless-stopped
+
+  bridge:
+    build: .
+    command: [bridge]
+    environment:
+      BUNBIRD_CONTROL_URL: http://control:8080
+      BUNBIRD_BRIDGE_TOKEN: ${BUNBIRD_BRIDGE_TOKEN:?Required}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:?Required}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?Required}
+      FEISHU_TENANT_KEY: ${FEISHU_TENANT_KEY:?Required}
+      FEISHU_DOMAIN: ${FEISHU_DOMAIN:-https://open.feishu.cn}
+      FEISHU_ALLOWED_CHAT_IDS: ${FEISHU_ALLOWED_CHAT_IDS:-}
+      FEISHU_SPOOL_PATH: /app/data/feishu-inbox.db
+    volumes:
+      - bridge-data:/app/data
+    depends_on:
+      - control
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  bridge-data:

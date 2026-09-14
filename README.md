@@ -1,0 +1,91 @@
+# BunBird 最小版
+
+根据《BunBird-智能体平台建设方案-v0.1.md》落地的飞书文字对话闭环。保持 **Java 21 / Spring Boot 管理服务 + Python Worker** 的边界，使用飞书官方 `lark-oapi` SDK 长连接接收事件，不需要公网地址、域名或回调服务器。当前是单企业、单应用试点版本。
+
+支持私聊、群内无需 @即可触发、按会话/话题保存最近多轮上下文、回复原消息、`/help`、`/status [任务ID]`、`/cancel [任务ID]`。任务创建和回复队列持久化，重复事件不会重复生成任务；Worker 失联和模型失败有明确状态，飞书发送失败单独重试。当前交付的回复为文字，不包含流式卡片。
+
+## 快速启动
+
+需要 Python 3.12+、uv，以及 JDK 21+ / Maven，或可用的 Docker Compose。Windows 如默认仍为 Java 8，请先将当前终端的 `JAVA_HOME`、`PATH` 指向 JDK 21 或更高版本。
+
+```powershell
+uv sync --frozen
+uv run python scripts/init_env.py
+```
+
+打开根目录 `.env`，填写 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_TENANT_KEY`。内部三个不同密钥及数据库密码已由初始化脚本随机生成。脚本不会覆盖已有 `.env`，该文件已加入忽略规则。飞书应用的权限、事件订阅和发布步骤见 [飞书接入说明](docs/feishu-setup.md)。
+
+初次联通可以保持 `MODEL_MODE=mock`，所有回答都会标注“演示模式，未调用真实模型”。真实回答需要改为 `MODEL_MODE=compatible`，并填写 `MODEL_BASE_URL`（以 `/v1` 等服务端要求的 API 前缀结尾）、`MODEL_NAME`、`MODEL_API_KEY`。Worker 向该地址下的 `/chat/completions` 发送非流式聊天请求，适配支持此协议的模型服务；不会自动替你选择服务商或上传资料。
+
+### 本地启动：三个终端
+
+在项目根目录构建并运行管理服务：
+
+```powershell
+mvn -f backend/pom.xml package
+uv run python scripts/start_control.py
+```
+
+第二个终端启动 Worker，第三个终端启动飞书连接器：
+
+```powershell
+uv run bunbird worker
+```
+
+```powershell
+uv run bunbird bridge
+```
+
+本地管理服务绑定 `127.0.0.1:8080`，使用 `data/` 中的 H2 文件数据库；飞书连接器也在 `data/` 中保存尚未交给管理服务的事件。`scripts/start_control.py` 自动读取 `.env`，直接运行 Java 时则需自行传入环境变量。访问 `http://127.0.0.1:8080/health` 可检查服务是否启动，其他接口都要求相应密钥。
+
+### Compose 启动
+
+```powershell
+docker compose up --build -d
+docker compose logs -f control worker bridge
+```
+
+Compose 使用 PostgreSQL、Java 管理服务、Python Worker 和飞书连接器四个服务，数据库和收件队列使用独立持久卷。宿主仅开放本地管理端口；Worker 只得到 Worker 密钥和模型凭据，飞书凭据仅交给连接器。停止使用 `docker compose down`；`down -v` 会删除持久卷，不要用于普通重启。
+
+## 飞书中使用
+
+发布应用并将机器人加入群后，私聊直接发送文字，群内也直接发送文字。例如“@BunBird 帮我写一个项目周报提纲”。机器人会在群消息下创建飞书可见话题，先在话题内回复任务 ID，完成后把答案发送到同一话题。私聊仍是普通回复。群里回复同一根消息可以继续该话题；私聊默认延续当前用户与机器人的会话，最近六个成功轮次在字符预算内进入上下文。
+
+`/status` 查询当前话题中自己的最新任务；`/status 完整任务ID` 可查询自己在当前聊天中发起的指定任务。取消同理。群中使用命令也无需 @机器人。无权访问、ID 不存在或跨聊天时统一提示未找到任务。管理员可用本地 CLI 查看全部试点任务：
+
+```powershell
+uv run bunbird tasks
+uv run bunbird inspect <完整任务ID>
+uv run bunbird cancel <完整任务ID>
+```
+
+## 消息状态表情
+
+机器人会在你发出的原消息上依次显示“思考”（等待模型生成）、“敲键盘”（准备发送答案）、“完成”（成功答案已发送）。失败和取消只清除处理中表情，不显示完成；不会读取或展示模型私有推理。模拟模式执行较快，中间表情可能很短暂。
+
+需要应用身份权限 `im:message.reactions:read` 和 `im:message.reactions:write_only`。表情请求使用独立持久队列，最多尝试五次；旧阶段重试会被新阶段替代，只移除本机器人添加的状态表情，不影响其他成员的表情，也不会因为表情失败重跑任务。表情队列文件位于飞书收件队列文件旁，备份时一并保留。
+
+## 验证
+
+```powershell
+mvn -f backend/pom.xml test
+uv run pytest -q
+uv run ruff check bunbird tests scripts
+uv run python scripts/smoke_test.py
+```
+
+最后一项需要先打包 Java 服务。它会在临时目录和随机本地端口启动真正的 Java/Python 进程，检查事件补交、十次重放去重、数据库重启恢复、模型 HTTP 请求和飞书发送请求结构；外部模型和飞书发送端使用本地测试替身，不发送真实消息、不消耗模型额度。当前验证证据与限制见 [验证记录](docs/validation.md)。
+
+## 最小版与原方案的对应关系
+
+这次实现的是阶段 0 中的消息接入与文字执行闭环，不代表原方案的整个阶段 1 已完成。为减少依赖，任务直接以数据库表作为持久队列，回复使用同事务 outbox，暂不引入 Redis。Task 与单次 Run 在本版合并，每个任务只允许一次执行租约；失败重新发消息创建新任务，不提供伪装成断点恢复的自动重跑。
+
+管理入口先提供鉴权 API 和 CLI，暂不建设 React 后台。没有 shell、代码编辑、OpenHands、容器代码沙箱、Git/PR、附件、流式卡片、知识库、技能市场、RBAC 管理页或办公写入；后续按原方案扩展，不能将本版描述为已具备这些能力。执行服务中没有飞书凭据或企业数据库凭据，也不能请求任意工具。
+
+内部接口与状态语义见 [接口说明](docs/api.md)。此版本固定一个企业和应用，包含租户字段和来源校验，但不是已完成的多租户平台。管理员密钥拥有试点全局读取/取消权限，普通飞书用户只通过平台事件操作自己的任务。
+
+## 目录与依赖
+
+`backend/` 为 Java 管理服务与数据库迁移，`bunbird/` 为 Python 连接器和 Worker，`tests/` 为 Python 测试，`scripts/` 为配置、启动与跨进程验证脚本，`docs/` 为接入和验证材料。Python 依赖通过 `uv.lock` 固定，Java 依赖由固定 Spring Boot 3.5.16 BOM 和 Maven 配置管理。
+
+飞书适配复用官方 [larksuite/oapi-sdk-python](https://github.com/larksuite/oapi-sdk-python)，固定 `lark-oapi==1.7.3`（MIT）；Spring Boot、HTTPX、H2、PostgreSQL 等保持各自许可证。任务状态、权限边界、持久收件队列、通知 outbox 与 Worker 协议由本项目实现。本版未复制 cc-connect、OpenHands 或 SkillHub 源码，也未声称已经接入这些项目。

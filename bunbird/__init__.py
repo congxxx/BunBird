@@ -1,0 +1,1 @@
+"""BunBird minimal Feishu platform."""

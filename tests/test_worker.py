@@ -1,0 +1,159 @@
+import asyncio
+import json
+
+import httpx
+import pytest
+
+from bunbird.model import Model, ModelConfig, ModelError, messages
+from bunbird.worker import execute
+
+
+def job():
+    return {"taskId": "task", "leaseToken": "lease", "prompt": "问题", "history": []}
+
+
+def test_model_request_and_usage_contract():
+    def handler(request):
+        assert str(request.url) == "https://model.test/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer test-key"
+        body = json.loads(request.content)
+        assert body["messages"][-1] == {"role": "user", "content": "问题"}
+        assert body["stream"] is False
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "回答"}}], "usage": {"total_tokens": 20}}
+        )
+
+    model = Model(
+        ModelConfig("compatible", "test-model", "https://model.test/v1", "test-key"),
+        httpx.MockTransport(handler),
+    )
+    answer = asyncio.run(model.answer(job()))
+    assert answer["result"] == "回答"
+    assert json.loads(answer["usageJson"])["total_tokens"] == 20
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{"message": {"content": ""}}]},
+        {"choices": [{"message": {"content": None, "tool_calls": [{}]}}]},
+        {"choices": [{"message": {"content": "too long"}, "finish_reason": "length"}]},
+    ],
+)
+def test_invalid_or_truncated_model_response_fails(body):
+    model = Model(
+        ModelConfig("compatible", "test", "https://model.test/v1", "key"),
+        httpx.MockTransport(lambda _: httpx.Response(200, json=body)),
+    )
+    with pytest.raises(ModelError):
+        asyncio.run(model.answer(job()))
+
+
+def test_auth_failure_does_not_retry_or_expose_body():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(401, text="sensitive provider error")
+
+    model = Model(
+        ModelConfig("compatible", "test", "https://model.test/v1", "key"),
+        httpx.MockTransport(handler),
+    )
+    with pytest.raises(ModelError, match="^MODEL_HTTP_401$"):
+        asyncio.run(model.answer(job()))
+    assert len(calls) == 1
+
+
+def test_transient_model_failure_retries_bounded(monkeypatch):
+    calls = []
+
+    async def no_wait(_):
+        pass
+
+    monkeypatch.setattr("bunbird.model.asyncio.sleep", no_wait)
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429)
+
+    model = Model(
+        ModelConfig("compatible", "test", "https://model.test/v1", "key"),
+        httpx.MockTransport(handler),
+    )
+    with pytest.raises(ModelError, match="MODEL_TEMPORARY"):
+        asyncio.run(model.answer(job()))
+    assert len(calls) == 3
+
+
+def test_history_keeps_complete_turns_and_budget():
+    task = job()
+    task["history"] = [
+        {"prompt": "x" * 17000, "result": "old"},
+        {"prompt": "recent", "result": "recent answer"},
+    ]
+    result = messages(task)
+    assert [m["role"] for m in result] == ["system", "user", "assistant", "user"]
+    assert result[1]["content"] == "recent"
+
+
+def test_mock_mode_is_explicitly_labelled():
+    answer = asyncio.run(Model(ModelConfig("mock", "mock-demo", "", "")).answer(job()))
+    assert "演示模式，未调用真实模型" in answer["result"]
+
+
+def test_worker_completion_and_retry_does_not_repeat_model():
+    completed = []
+
+    def handler(request):
+        completed.append(json.loads(request.content))
+        return httpx.Response(503 if len(completed) == 1 else 200, json={"accepted": True})
+
+    class CountingModel:
+        calls = 0
+
+        async def answer(self, _):
+            self.calls += 1
+            return {"result": "回答", "model": "test"}
+
+    model = CountingModel()
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            base_url="http://control", transport=httpx.MockTransport(handler)
+        ) as http:
+            await execute(http, model, job())
+
+    asyncio.run(scenario())
+    assert model.calls == 1
+    assert len(completed) == 2
+    assert completed[0] == completed[1]
+    assert completed[0]["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("control_status", [200, 503])
+def test_cancel_or_control_loss_aborts_model_without_completion(control_status):
+    paths, cancelled = [], []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(control_status, json={"active": False})
+
+    class SlowModel:
+        async def answer(self, _):
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cancelled.append(True)
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            base_url="http://control", transport=httpx.MockTransport(handler)
+        ) as http:
+            await asyncio.wait_for(execute(http, SlowModel(), job()), timeout=6)
+
+    asyncio.run(scenario())
+    assert cancelled == [True]
+    assert paths == ["/internal/worker/tasks/task/heartbeat"]
