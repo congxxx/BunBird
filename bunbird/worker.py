@@ -10,7 +10,7 @@ import httpx
 from bunbird.config import ControlConfig
 from bunbird.control import async_client
 from bunbird.model import Model, ModelError
-from bunbird.workspace_task import target_from_prompt
+from bunbird.workspace_task import REQUEST_ERRORS, target_from_prompt
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +68,11 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
         try:
             output, _ = await process.communicate(json.dumps(job).encode())
             if process.returncode:
-                raise ModelError("WORKSPACE_FAILED")
+                try:
+                    code = json.loads(output).get("error")
+                except (ValueError, AttributeError):
+                    code = None
+                raise ModelError(code if code in REQUEST_ERRORS else "WORKSPACE_FAILED")
             return json.loads(output)
         finally:
             if process.returncode is None:

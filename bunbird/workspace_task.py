@@ -12,8 +12,23 @@ from urllib.parse import urlsplit
 
 from bunbird.workspaces import WorkspaceError, Workspaces, exclusive, git
 
+REQUEST_ERRORS = {"WORKSPACE_INVALID_URL", "WORKSPACE_HOST_NOT_ALLOWED", "WORKSPACE_NOT_REGISTERED"}
+
+
+class WorkspaceRequestError(WorkspaceError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
 
 def target_from_prompt(prompt):
+    # Feishu can wrap only the email-like prefix of an SCP-style Git address.
+    # Preserve the repository suffix outside the link, and use the link destination.
+    prompt = re.sub(
+        r"\[[^\]\r\n]*\]\((https://[^\s)]+|mailto:git@[^\s)]+)\)",
+        lambda match: match[1].removeprefix("mailto:"),
+        prompt,
+    )
     if prompt.startswith("/workspace"):
         parts = prompt.split()
         if len(parts) != 2 or parts[0] != "/workspace":
@@ -44,7 +59,7 @@ def remote_url(target):
     }
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in hosts
+        or not parsed.hostname
         or parsed.username
         or parsed.password
         or parsed.port not in (None, 443)
@@ -53,8 +68,13 @@ def remote_url(target):
         or not re.fullmatch(r"/[A-Za-z0-9_./-]+", parsed.path)
         or any(p in {".", ".."} for p in parsed.path.split("/"))
     ):
-        raise WorkspaceError(
-            "远程地址须为允许主机上的 HTTPS 仓库，不能包含令牌；管理员可配置 WORKSPACE_GIT_HOSTS。"
+        raise WorkspaceRequestError(
+            "WORKSPACE_INVALID_URL",
+            "远程地址须为允许主机上的 HTTPS 仓库，不能包含令牌；管理员可配置 WORKSPACE_GIT_HOSTS。",
+        )
+    if parsed.hostname not in hosts:
+        raise WorkspaceRequestError(
+            "WORKSPACE_HOST_NOT_ALLOWED", "仓库主机未加入 WORKSPACE_GIT_HOSTS"
         )
     return f"https://{parsed.hostname}{parsed.path}", parsed.hostname
 
@@ -101,7 +121,9 @@ def provision(job):
                         name, source, git(source, "branch", "--show-current") or "HEAD"
                     )
     else:
-        raise WorkspaceError("未登记该仓库。请发送 /workspace bunbird，或提供完整远程仓库地址。")
+        raise WorkspaceRequestError(
+            "WORKSPACE_NOT_REGISTERED", "未登记该仓库，请先登记或提供完整远程地址。"
+        )
     row = manager.create(name, job["taskId"])
     clean = not row["changes"]
     if not clean:
@@ -122,7 +144,7 @@ if __name__ == "__main__":
     try:
         value = provision(json.loads(sys.stdin.read()))
         print(json.dumps(value, ensure_ascii=True))
-    except (WorkspaceError, ValueError):
+    except (WorkspaceError, ValueError) as error:
         # Detailed Git output and input URLs may contain credentials; do not forward them.
-        print(json.dumps({"error": "WORKSPACE_FAILED"}))
+        print(json.dumps({"error": getattr(error, "code", "WORKSPACE_FAILED")}))
         sys.exit(2)

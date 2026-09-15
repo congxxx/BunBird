@@ -43,6 +43,18 @@ def test_ssh_address_is_normalized_without_ssh_execution():
     assert remote_url("git@github.com:org/repo.git")[0] == "https://github.com/org/repo.git"
 
 
+def test_feishu_mailto_link_preserves_ssh_repository_suffix():
+    prompt = "拉取一下这个项目\n[git@code.example.com:](mailto:git@code.example.com:)org/repo.git"
+    assert target_from_prompt(prompt) == "git@code.example.com:org/repo.git"
+
+
+def test_feishu_https_link_uses_destination():
+    assert (
+        target_from_prompt("克隆 [项目](https://github.com/org/repo.git)")
+        == "https://github.com/org/repo.git"
+    )
+
+
 @pytest.fixture
 def registered(tmp_path, monkeypatch):
     source = tmp_path / "source"
