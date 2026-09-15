@@ -75,7 +75,17 @@ def main():
             from bunbird.worker import run
 
             config = ControlConfig.load("worker")
-            asyncio.run(run(config, Model(ModelConfig.load())))
+            import os
+
+            if os.getenv("AGENT_EXECUTOR", "model") == "claude":
+                from bunbird.claude_agent import ClaudeAgent
+
+                executor = ClaudeAgent(ModelConfig.load())
+            elif os.getenv("AGENT_EXECUTOR", "model") == "model":
+                executor = Model(ModelConfig.load())
+            else:
+                raise ValueError("AGENT_EXECUTOR 必须是 model 或 claude")
+            asyncio.run(run(config, executor))
         else:
             from bunbird.control import client
 

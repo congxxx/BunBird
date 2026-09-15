@@ -16,7 +16,7 @@ public class TaskService {
     private final JdbcTemplate db;
     private final String tenant, appId;
     private final Clock clock;
-    static final long LEASE_MS = 30_000, DEADLINE_MS = 180_000;
+    static final long LEASE_MS = 30_000, DEADLINE_MS = 900_000;
 
     @org.springframework.beans.factory.annotation.Autowired
     public TaskService(JdbcTemplate db, @Value("${bunbird.tenant}") String tenant,
@@ -60,7 +60,7 @@ public class TaskService {
         String command = words[0].toLowerCase(Locale.ROOT);
         if (command.startsWith("/") && !command.equals("/workspace")) {
             if (command.equals("/help")) {
-                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n/workspace bunbird 创建已登记仓库工作区；也可填写 HTTPS 仓库地址。只准备工作区，不执行代码或办公写操作。");
+                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n启用 Claude Code 时可直接发送拉取项目、修改代码等任务要求；在原话题继续回复即可续接会话。");
             } else if (command.equals("/unsupported")) {
                 enqueue(null, in.messageId(), "当前最小版仅支持文字消息，请将问题以文字发送。");
             } else if (command.equals("/too-long")) {
@@ -137,7 +137,7 @@ public class TaskService {
             var task = task(taskId);
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);
             Collections.reverse(history);
-            return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant);
+            return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant, "topicId", topicId, "senderId", task.get("sender_id"));
         }
         return Map.of();
     }

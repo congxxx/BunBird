@@ -35,7 +35,6 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
         # Old jobs/tests without tenantId retain the existing plain conversation contract.
         if "tenantId" not in job:
             return await model.answer(job)
-        target = target_from_prompt(job["prompt"])
 
         async def progress(phase, detail):
             for attempt in range(3):
@@ -51,6 +50,9 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
                         raise ModelError("PROGRESS_UNAVAILABLE") from None
                     await asyncio.sleep(1)
 
+        if hasattr(model, "answer_with_progress"):
+            return await model.answer_with_progress(job, progress)
+        target = target_from_prompt(job["prompt"])
         name = "Git 工作空间准备" if target is not None else model.config.name
         await progress("STARTED", f"Session：{task_id}\n执行方式：{name}")
         if target is None:
@@ -98,7 +100,9 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
     heartbeat = asyncio.create_task(monitor())
     try:
         done, _ = await asyncio.wait(
-            {answer, heartbeat}, timeout=150, return_when=asyncio.FIRST_COMPLETED
+            {answer, heartbeat},
+            timeout=getattr(model, "execution_timeout", 150),
+            return_when=asyncio.FIRST_COMPLETED,
         )
         if heartbeat in done:
             log.info("任务 %s 已停止：取消或租约不可用", task_id)

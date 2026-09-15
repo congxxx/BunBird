@@ -28,6 +28,8 @@ uv run bunbird workspace remove <工作空间ID>
 
 ## 飞书入口
 
+以下固定命令和主机列表适用于 `AGENT_EXECUTOR=model`。启用 [Claude Code 执行器](claude-agent.md) 后，消息直接交给 Agent，使用自然语言即可，不需要预登记仓库或维护该主机列表。
+
 在已接入的飞书群聊或私聊发送 `/workspace bunbird` 或 `帮我克隆 bunbird`，会为该任务创建已登记仓库的独立工作空间。远程仓库可以发送 `/workspace https://github.com/组织/仓库.git`，也可以发送“拉取一下这个项目”并在下一行放仓库地址。`git@主机:组织/仓库.git` 会转换为 HTTPS 地址，不会执行 SSH。请求由固定规则识别，普通聊天仍由配置的模型回答；工作空间创建不消耗模型调用，也不会提交或推送代码。
 
 远程主机由 `WORKSPACE_GIT_HOSTS` 控制，默认允许 GitHub、Gitee 和 GitCode；企业自建 Git 主机需管理员加入该配置并重启 Worker。地址不能包含用户名、密码、令牌或查询参数。私有仓库令牌请放在 `.env` 的 `WORKSPACE_GIT_TOKEN_<主机名大写且非字母数字改下划线>` 中，可配套设置 `WORKSPACE_GIT_USER_<同样后缀>`，默认用户名为 oauth2。不要将令牌发送到群聊。认证头仅通过 Git 子进程环境传递，不写入 URL 或仓库配置，也不会跟随 HTTP 重定向。

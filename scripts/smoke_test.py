@@ -104,6 +104,7 @@ def main():
                 "BUNBIRD_WORKER_TOKEN": secrets.token_hex(24),
                 "BUNBIRD_ADMIN_TOKEN": secrets.token_hex(24),
                 "MODEL_MODE": "compatible",
+                "AGENT_EXECUTOR": "model",
                 "MODEL_NAME": "local-contract-model",
                 "MODEL_BASE_URL": f"http://127.0.0.1:{model_server.server_port}/v1",
                 "MODEL_API_KEY": "local-test-key",
