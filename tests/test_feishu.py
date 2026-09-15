@@ -183,6 +183,28 @@ def test_group_reply_explicitly_creates_visible_feishu_thread():
     assert request.request_body.uuid == "fixed-uuid"
 
 
+@pytest.mark.parametrize(
+    "state,color",
+    [("STARTED", "blue"), ("WORKSPACE", "blue"), ("SUCCEEDED", "green"), ("FAILED", "red")],
+)
+def test_progress_cards_preserve_thread_and_escape_content(state, color):
+    request = build_reply(
+        {
+            "replyTo": "om-root",
+            "deliveryId": "uuid",
+            "content": "<at id=all>测试</at>",
+            "taskState": state,
+            "replyInThread": True,
+        }
+    )
+    body = request.request_body
+    assert body.msg_type == "interactive"
+    card = json.loads(body.content)
+    assert card["header"]["template"] == color
+    assert card["elements"][0]["text"]["tag"] == "plain_text"
+    assert body.reply_in_thread is True
+
+
 def test_control_failure_retains_event_without_sending(config, payload):
     bridge = Bridge.__new__(Bridge)
     bridge.inbox = Inbox(config.spool_path)

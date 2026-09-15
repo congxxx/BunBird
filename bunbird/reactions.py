@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 STATES = {
     "QUEUED": "THINKING",
     "RUNNING": "THINKING",
+    "STARTED": "THINKING",
+    "WORKSPACE": "Typing",
     "SUCCEEDED": "DONE",
     "FAILED": "CLEAR",
     "CANCELLED": "CLEAR",

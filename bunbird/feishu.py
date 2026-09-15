@@ -89,13 +89,29 @@ def normalize(payload: dict, config: FeishuConfig, bot_open_id: str) -> dict | N
 
 
 def build_reply(delivery: dict) -> ReplyMessageRequest:
+    styles = {
+        "STARTED": ("🤖 BunBird 会话已启动", "blue"),
+        "WORKSPACE": ("⌨️ 处理进度", "blue"),
+        "SUCCEEDED": ("✅ 完成", "green"),
+        "FAILED": ("任务未完成", "red"),
+        "CANCELLED": ("任务已取消", "grey"),
+    }
+    style = styles.get(delivery.get("taskState"))
+    content = {"text": delivery["content"]}
+    if style:
+        content = {
+            "header": {"template": style[1], "title": {"tag": "plain_text", "content": style[0]}},
+            "elements": [
+                {"tag": "div", "text": {"tag": "plain_text", "content": delivery["content"]}}
+            ],
+        }
     return (
         ReplyMessageRequest.builder()
         .message_id(delivery["replyTo"])
         .request_body(
             ReplyMessageRequestBody.builder()
-            .msg_type("text")
-            .content(json.dumps({"text": delivery["content"]}, ensure_ascii=False))
+            .msg_type("interactive" if style else "text")
+            .content(json.dumps(content, ensure_ascii=False))
             .uuid(delivery["deliveryId"])
             .reply_in_thread(delivery.get("replyInThread", False))
             .build()

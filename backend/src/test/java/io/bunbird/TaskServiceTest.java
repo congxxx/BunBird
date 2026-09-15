@@ -90,6 +90,21 @@ class TaskServiceTest {
         assertThat(service.task(id)).containsEntry("status","CANCELLED");
         assertThat(service.deliveries(id)).hasSize(2);
     }
+
+    @Test void workspaceCommandAndProgressAreDurableAndLeaseFenced() {
+        String id=submit("workspace","u","t","/workspace bunbird");
+        assertThat(id).isNotNull();
+        var job=service.claim();
+        assertThat(job).containsEntry("tenantId", "tenant-test");
+        var progress=new Progress((String)job.get("leaseToken"), "STARTED", "Session: " + id);
+        service.progress(id,progress);
+        service.progress(id,progress);
+        assertThat(service.deliveries(id)).hasSize(2);
+        assertThat(db.queryForObject("SELECT task_state FROM delivery WHERE task_id=? ORDER BY position DESC LIMIT 1", String.class,id)).isEqualTo("STARTED");
+        service.cancel(id);
+        assertThatThrownBy(()->service.progress(id,new Progress(progress.leaseToken(),"WORKSPACE","preparing"))).hasMessageContaining("409");
+        assertThat(service.deliveries(id)).hasSize(3);
+    }
     @Test void queuedCancellationCannotBeClaimed() {
         String id=submit("e","u","t","问题");
         service.cancel(id);

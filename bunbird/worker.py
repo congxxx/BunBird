@@ -1,12 +1,16 @@
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import sys
 
 import httpx
 
 from bunbird.config import ControlConfig
 from bunbird.control import async_client
 from bunbird.model import Model, ModelError
+from bunbird.workspace_task import target_from_prompt
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +31,66 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
                 # Fail closed on a lost control connection; the database expires the lease.
                 return
 
-    answer = asyncio.create_task(model.answer(job))
+    async def perform():
+        # Old jobs/tests without tenantId retain the existing plain conversation contract.
+        if "tenantId" not in job:
+            return await model.answer(job)
+        target = target_from_prompt(job["prompt"])
+
+        async def progress(phase, detail):
+            for attempt in range(3):
+                try:
+                    response = await http.post(
+                        root + "/progress",
+                        json={"leaseToken": token, "phase": phase, "detail": detail},
+                    )
+                    response.raise_for_status()
+                    return
+                except httpx.HTTPError:
+                    if attempt == 2:
+                        raise ModelError("PROGRESS_UNAVAILABLE") from None
+                    await asyncio.sleep(1)
+
+        name = "Git 工作空间准备" if target is not None else model.config.name
+        await progress("STARTED", f"Session：{task_id}\n执行方式：{name}")
+        if target is None:
+            return await model.answer(job)
+        await progress("WORKSPACE", "正在准备独立仓库和任务工作区，完成后将报告目录、分支与提交。")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "bunbird.workspace_task",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            **({"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}),
+        )
+        try:
+            output, _ = await process.communicate(json.dumps(job).encode())
+            if process.returncode:
+                raise ModelError("WORKSPACE_FAILED")
+            return json.loads(output)
+        finally:
+            if process.returncode is None:
+                if os.name == "nt":
+                    killer = await asyncio.create_subprocess_exec(
+                        "taskkill",
+                        "/PID",
+                        str(process.pid),
+                        "/T",
+                        "/F",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        creationflags=0x08000000,
+                    )
+                    await killer.wait()
+                else:
+                    import signal
+
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+
+    answer = asyncio.create_task(perform())
     heartbeat = asyncio.create_task(monitor())
     try:
         done, _ = await asyncio.wait(

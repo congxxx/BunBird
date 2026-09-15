@@ -45,6 +45,10 @@ services:
       MODEL_BASE_URL: ${MODEL_BASE_URL:-}
       MODEL_NAME: ${MODEL_NAME:-}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
+      WORKSPACE_ROOT: /app/data/workspaces
+      WORKSPACE_GIT_HOSTS: ${WORKSPACE_GIT_HOSTS:-github.com,gitee.com,gitcode.com}
+    volumes:
+      - worker-data:/app/data
     depends_on:
       - control
     restart: unless-stopped
@@ -70,3 +74,4 @@ services:
 volumes:
   postgres-data:
   bridge-data:
+  worker-data:

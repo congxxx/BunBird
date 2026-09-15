@@ -22,6 +22,7 @@ from bunbird.config import ControlConfig, FeishuConfig
 from bunbird.control import client
 from bunbird.feishu import Bridge, normalize
 from bunbird.inbox import Inbox
+from bunbird.workspaces import Workspaces, git
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,7 +109,24 @@ def main():
                 "MODEL_API_KEY": "local-test-key",
                 "PYTHONIOENCODING": "utf-8",
                 "NO_PROXY": "127.0.0.1,localhost",
+                "WORKSPACE_ROOT": str(folder / "workspaces"),
             }
+            source = folder / "source"
+            source.mkdir()
+            git(source, "init", "-b", "main")
+            (source / "README.md").write_text("smoke test")
+            git(source, "add", ".")
+            git(
+                source,
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            )
+            Workspaces(env["WORKSPACE_ROOT"], "tenant-test").register("demo", source, "main")
             flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             with (folder / "process.log").open("w", encoding="utf-8") as logs:
                 bridge = Bridge.__new__(Bridge)
@@ -213,21 +231,55 @@ def main():
                         return current["status"] == "SUCCEEDED"
 
                     wait_for(succeeded)
-                    wait_for(lambda: (bridge.pump_once(), len(sent) == 2)[1])
+                    wait_for(lambda: (bridge.pump_once(), len(sent) == 3)[1])
                     result = admin.get(f"/api/tasks/{task_id}").json()
                     assert result["result"] == "跨进程测试回答"
                     assert result["model"] == "local-contract-model"
                     assert len(model_calls) == 1
                     deliveries = admin.get(f"/api/tasks/{task_id}/deliveries").json()
                     assert all(d["status"] == "SENT" for d in deliveries)
-                    assert len({r.request_body.uuid for r in sent}) == 2
+                    assert len({r.request_body.uuid for r in sent}) == 3
                     assert all(r.message_id == "om-question" for r in sent)
                     assert all(r.request_body.reply_in_thread is True for r in sent)
                     events = admin.get(f"/api/tasks/{task_id}/events").json()
-                    assert [e["type"] for e in events] == ["QUEUED", "RUNNING", "SUCCEEDED"]
+                    assert [e["type"] for e in events] == [
+                        "QUEUED",
+                        "RUNNING",
+                        "PROGRESS_STARTED",
+                        "SUCCEEDED",
+                    ]
+                    workspace_incoming = {
+                        **incoming,
+                        "eventId": "workspace-event",
+                        "messageId": "om-workspace",
+                        "topicKey": "om-workspace",
+                        "text": "/workspace demo",
+                    }
+                    response = bridge.http.post("/internal/bridge/events", json=workspace_incoming)
+                    response.raise_for_status()
+                    task_id = response.json()["taskId"]
+                    wait_for(succeeded)
+                    wait_for(lambda: (bridge.pump_once(), len(sent) == 7)[1])
+                    current = admin.get(f"/api/tasks/{task_id}").json()
+                    assert current["model"] == "git-workspace"
+                    assert "提交：未执行" in current["result"]
+                    assert len(model_calls) == 1
+                    assert (
+                        Workspaces(env["WORKSPACE_ROOT"], "tenant-test").list()[0]["task_id"]
+                        == task_id
+                    )
+                    assert all(r.request_body.reply_in_thread for r in sent[3:])
+                    assert [r.request_body.msg_type for r in sent[3:]] == [
+                        "text",
+                        "interactive",
+                        "interactive",
+                        "interactive",
+                    ]
                     print(
                         "PASS: inbox recovery, 10 duplicate replays, database restart, "
-                        "Java -> Python -> HTTP model -> captured Feishu replies; one model call"
+                        "Java -> Python -> HTTP model and real Git workspace -> "
+                        "captured Feishu cards; "
+                        "one model call"
                     )
                 except Exception:
                     # Synthetic data only; real credentials are never passed to these processes.

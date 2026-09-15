@@ -16,7 +16,7 @@ class WorkspaceError(ValueError):
     pass
 
 
-def git(directory, *args, timeout=120):
+def git(directory, *args, timeout=120, extra_env=None):
     # Ignore inherited Git directory/config overrides and disable hooks and external filters.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(
@@ -25,6 +25,7 @@ def git(directory, *args, timeout=120):
         GIT_TERMINAL_PROMPT="0",
         GCM_INTERACTIVE="never",
     )
+    env.update(extra_env or {})
     try:
         result = subprocess.run(
             [

@@ -58,9 +58,9 @@ public class TaskService {
         String text = in.text().strip();
         String[] words = text.split("\\s+", 2);
         String command = words[0].toLowerCase(Locale.ROOT);
-        if (command.startsWith("/")) {
+        if (command.startsWith("/") && !command.equals("/workspace")) {
             if (command.equals("/help")) {
-                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n当前支持文字对话，不执行代码或办公写操作。");
+                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n/workspace bunbird 创建已登记仓库工作区；也可填写 HTTPS 仓库地址。只准备工作区，不执行代码或办公写操作。");
             } else if (command.equals("/unsupported")) {
                 enqueue(null, in.messageId(), "当前最小版仅支持文字消息，请将问题以文字发送。");
             } else if (command.equals("/too-long")) {
@@ -137,7 +137,7 @@ public class TaskService {
             var task = task(taskId);
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);
             Collections.reverse(history);
-            return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history);
+            return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant);
         }
         return Map.of();
     }
@@ -147,6 +147,24 @@ public class TaskService {
         int changed = db.update("UPDATE task SET lease_until=? WHERE id=? AND tenant_id=? AND lease_token=? AND status='RUNNING' AND lease_until>? AND deadline>?",
                 now()+LEASE_MS, taskId, tenant, token, now(), now());
         return Map.of("active", changed == 1);
+    }
+
+    @Transactional
+    public Map<String, Object> progress(String taskId, Progress progress) {
+        var rows = db.queryForList("SELECT * FROM task WHERE id=? AND tenant_id=? FOR UPDATE", taskId, tenant);
+        if (rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND);
+        var row = rows.getFirst();
+        if (!"RUNNING".equals(row.get("status")) || !progress.leaseToken().equals(row.get("lease_token"))
+                || ((Number)row.get("lease_until")).longValue() <= now()
+                || ((Number)row.get("deadline")).longValue() <= now())
+            throw new ResponseStatusException(CONFLICT, "Lease lost");
+        String type = "PROGRESS_" + progress.phase();
+        if (db.queryForObject("SELECT COUNT(*) FROM run_event WHERE task_id=? AND type=?", Integer.class, taskId, type) == 0) {
+            event(taskId, type, progress.detail());
+            enqueue(taskId, (String)row.get("message_id"), progress.detail());
+            db.update("UPDATE delivery SET task_state=? WHERE task_id=? AND id=(SELECT id FROM delivery WHERE task_id=? ORDER BY position DESC LIMIT 1)", progress.phase(), taskId, taskId);
+        }
+        return Map.of("accepted", true);
     }
 
     @Transactional
