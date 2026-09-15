@@ -1,5 +1,7 @@
+import html
 import json
 import logging
+import re
 import threading
 
 import httpx
@@ -105,6 +107,19 @@ def build_reply(delivery: dict) -> ReplyMessageRequest:
                 {"tag": "div", "text": {"tag": "plain_text", "content": delivery["content"]}}
             ],
         }
+        if delivery.get("taskState") == "SUCCEEDED":
+            # Render model Markdown, but never turn generated mention tags into notifications.
+            markdown = re.sub(
+                r"</?at\b[^>]*>",
+                lambda match: html.escape(match[0]),
+                delivery["content"],
+                flags=re.IGNORECASE,
+            )
+            content = {
+                "schema": "2.0",
+                "header": content["header"],
+                "body": {"elements": [{"tag": "markdown", "content": markdown}]},
+            }
     return (
         ReplyMessageRequest.builder()
         .message_id(delivery["replyTo"])

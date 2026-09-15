@@ -141,10 +141,12 @@ class ClaudeAgent:
         with exclusive(folder / "session.lock"):
             cwd = await asyncio.to_thread(self.workspace, folder, job, key)
             state = folder / "initialized"
-            await progress(
-                "STARTED",
-                f"Session：{key}\n执行器：Claude Code\n模型：{self.config.name}\n工作目录：{cwd}",
-            )
+            if not state.exists():
+                await progress(
+                    "STARTED",
+                    f"Session：{key}\n执行器：Claude Code\n模型：{self.config.name}"
+                    f"\n工作目录：{cwd}",
+                )
             command = [
                 self.executable,
                 "--bare",
