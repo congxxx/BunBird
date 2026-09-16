@@ -1,12 +1,14 @@
 """Claude Code print-mode adapter with durable, user/topic-scoped sessions."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
 import signal
+import time
 import uuid
 from pathlib import Path
 
@@ -147,6 +149,7 @@ class ClaudeAgent:
                     f"Session：{key}\n执行器：Claude Code\n模型：{self.config.name}"
                     f"\n工作目录：{cwd}",
                 )
+            await progress("UPDATE_0", "正在理解请求并检查会话上下文。")
             command = [
                 self.executable,
                 "--bare",
@@ -183,20 +186,56 @@ class ClaudeAgent:
                     else {"start_new_session": True}
                 ),
             )
-            result, working = None, False
+            result = None
+            steps = ["正在理解请求并检查会话上下文。"]
+            revision, last_update = 0, 0.0
+            tool_labels = {
+                "Read": "正在读取项目文件",
+                "Glob": "正在查找相关文件",
+                "Grep": "正在搜索相关代码",
+                "Write": "正在创建文件",
+                "Edit": "正在修改文件",
+                "Bash": "正在执行命令或检查",
+            }
+
+            async def report(detail):
+                nonlocal revision, last_update
+                if not steps or steps[-1] != detail:
+                    steps.append(detail)
+                if time.monotonic() - last_update >= 1 and revision < 999:
+                    revision += 1
+                    last_update = time.monotonic()
+                    await progress(f"UPDATE_{revision}", "\n".join(steps[-20:]))
+
+            read_task = None
+            started_at = time.monotonic()
             try:
                 process.stdin.write(job["prompt"].encode("utf-8"))
                 await process.stdin.drain()
                 process.stdin.close()
-                while line := await process.stdout.readline():
+                read_task = asyncio.create_task(process.stdout.readline())
+                while True:
+                    try:
+                        line = await asyncio.wait_for(asyncio.shield(read_task), timeout=5)
+                    except TimeoutError:
+                        elapsed = int(time.monotonic() - started_at)
+                        await report(f"任务仍在处理中（已运行 {elapsed} 秒）。")
+                        continue
+                    if not line:
+                        break
+                    read_task = asyncio.create_task(process.stdout.readline())
                     event = json.loads(line)
                     if event.get("type") == "system" and event.get("subtype") == "init":
                         state.touch()
                     if event.get("type") == "assistant":
                         blocks = event.get("message", {}).get("content", [])
-                        if not working and any(b.get("type") == "tool_use" for b in blocks):
-                            working = True
-                            await progress("WORKSPACE", "Claude Code 正在调用工具处理任务。")
+                        for block in blocks:
+                            if block.get("type") == "tool_use":
+                                await report(tool_labels.get(block.get("name"), "正在处理任务"))
+                    if event.get("type") == "user":
+                        blocks = event.get("message", {}).get("content", [])
+                        if any(b.get("type") == "tool_result" for b in blocks):
+                            await report("已收到工具结果，正在检查并继续处理。")
                     if event.get("type") == "result":
                         result = event
                 await process.wait()
@@ -219,3 +258,7 @@ class ClaudeAgent:
                 }
             finally:
                 await stop_tree(process)
+                if read_task:
+                    read_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await read_task

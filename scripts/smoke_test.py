@@ -22,6 +22,7 @@ from bunbird.config import ControlConfig, FeishuConfig
 from bunbird.control import client
 from bunbird.feishu import Bridge, normalize
 from bunbird.inbox import Inbox
+from bunbird.progress_cards import ProgressCards, success
 from bunbird.workspaces import Workspaces, git
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,7 +96,8 @@ def main():
                 "FEISHU_TENANT_KEY": "tenant-test",
                 "FEISHU_APP_ID": "cli-test",
                 "DATABASE_URL": (
-                    f"jdbc:h2:file:{folder.as_posix()}/db;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE"
+                    # Windows terminate() kills Java abruptly; commit synchronously before restart.
+                    f"jdbc:h2:file:{folder.as_posix()}/db;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;WRITE_DELAY=0"
                 ),
                 "DATABASE_USER": "sa",
                 "DATABASE_PASSWORD": "",
@@ -136,6 +138,7 @@ def main():
                     ControlConfig(env["BUNBIRD_CONTROL_URL"], env["BUNBIRD_BRIDGE_TOKEN"])
                 )
                 sent = []
+                patched = []
 
                 def reply(request):
                     sent.append(request)
@@ -144,8 +147,16 @@ def main():
                     )
 
                 bridge.sdk = SimpleNamespace(
-                    im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(reply=reply)))
+                    im=SimpleNamespace(
+                        v1=SimpleNamespace(
+                            message=SimpleNamespace(
+                                reply=reply,
+                                patch=lambda request: (patched.append(request), success())[1],
+                            )
+                        )
+                    )
                 )
+                bridge.cards = ProgressCards(folder / "cards.db", bridge.sdk)
                 admin = client(
                     ControlConfig(env["BUNBIRD_CONTROL_URL"], env["BUNBIRD_ADMIN_TOKEN"])
                 )
@@ -216,7 +227,8 @@ def main():
                     stop(process)
                     process = start_control()
                     wait_for(ready)
-                    assert admin.get(f"/api/tasks/{task_id}").json()["status"] == "QUEUED"
+                    restored = admin.get(f"/api/tasks/{task_id}").json()
+                    assert restored["status"] == "QUEUED", restored
                     worker = subprocess.Popen(
                         [sys.executable, "-m", "bunbird.cli", "worker"],
                         cwd=ROOT,
@@ -232,14 +244,14 @@ def main():
                         return current["status"] == "SUCCEEDED"
 
                     wait_for(succeeded)
-                    wait_for(lambda: (bridge.pump_once(), len(sent) == 3)[1])
+                    wait_for(lambda: (bridge.pump_once(), len(sent) == 2)[1])
                     result = admin.get(f"/api/tasks/{task_id}").json()
                     assert result["result"] == "跨进程测试回答"
                     assert result["model"] == "local-contract-model"
                     assert len(model_calls) == 1
                     deliveries = admin.get(f"/api/tasks/{task_id}/deliveries").json()
                     assert all(d["status"] == "SENT" for d in deliveries)
-                    assert len({r.request_body.uuid for r in sent}) == 3
+                    assert len({r.request_body.uuid for r in sent}) == 2
                     assert all(r.message_id == "om-question" for r in sent)
                     assert all(r.request_body.reply_in_thread is True for r in sent)
                     events = admin.get(f"/api/tasks/{task_id}/events").json()
@@ -260,7 +272,7 @@ def main():
                     response.raise_for_status()
                     task_id = response.json()["taskId"]
                     wait_for(succeeded)
-                    wait_for(lambda: (bridge.pump_once(), len(sent) == 7)[1])
+                    wait_for(lambda: (bridge.pump_once(), len(sent) == 5)[1])
                     current = admin.get(f"/api/tasks/{task_id}").json()
                     assert current["model"] == "git-workspace"
                     assert "提交：未执行" in current["result"]
@@ -269,13 +281,14 @@ def main():
                         Workspaces(env["WORKSPACE_ROOT"], "tenant-test").list()[0]["task_id"]
                         == task_id
                     )
-                    assert all(r.request_body.reply_in_thread for r in sent[3:])
-                    assert [r.request_body.msg_type for r in sent[3:]] == [
-                        "text",
+                    assert all(r.request_body.reply_in_thread for r in sent[2:])
+                    assert [r.request_body.msg_type for r in sent[2:]] == [
                         "interactive",
                         "interactive",
                         "interactive",
                     ]
+                    assert len(patched) == 1
+                    assert "最终结论见下方消息" in patched[0].request_body.content
                     print(
                         "PASS: inbox recovery, 10 duplicate replays, database restart, "
                         "Java -> Python -> HTTP model and real Git workspace -> "
@@ -297,6 +310,7 @@ def main():
                     admin.close()
                     bridge.http.close()
                     bridge.inbox.close()
+                    bridge.cards.close()
     finally:
         stop(worker)
         stop(process)

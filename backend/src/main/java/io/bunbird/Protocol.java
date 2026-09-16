@@ -19,7 +19,7 @@ public final class Protocol {
             @NotBlank @Pattern(regexp="p2p|group") String chatType) {}
     public record Lease(@NotBlank String leaseToken) {}
     public record Progress(@NotBlank String leaseToken,
-            @Pattern(regexp="STARTED|WORKSPACE") @NotBlank String phase,
+            @Pattern(regexp="STARTED|WORKSPACE|UPDATE_[0-9]{1,3}") @NotBlank String phase,
             @NotBlank @Size(max=2000) String detail) {}
     public record Completion(@NotBlank String leaseToken,
             @Pattern(regexp="SUCCEEDED|FAILED") @NotBlank String status,

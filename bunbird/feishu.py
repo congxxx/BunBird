@@ -11,6 +11,7 @@ from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
 from bunbird.config import ControlConfig, FeishuConfig
 from bunbird.control import client
 from bunbird.inbox import Inbox
+from bunbird.progress_cards import ProgressCards, success
 from bunbird.reactions import Reactions
 
 log = logging.getLogger(__name__)
@@ -181,13 +182,28 @@ class Bridge:
             self.reactions.enqueue(delivery, preparing=True)
             self.reactions.pump_once(delivery["replyTo"])
         try:
-            sent = self.sdk.im.v1.message.reply(build_reply(delivery))
-            success = sent.success()
+            state = delivery.get("taskState", "")
+            if state == "QUEUED":
+                sent = success()
+            elif hasattr(self, "cards") and (state.startswith("UPDATE_") or state == "WORKSPACE"):
+                sent = self.cards.update(delivery, build_reply)
+            else:
+                finished = (
+                    self.cards.finish(delivery)
+                    if hasattr(self, "cards") and state in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                    else success()
+                )
+                sent = (
+                    self.sdk.im.v1.message.reply(build_reply(delivery))
+                    if finished.success()
+                    else finished
+                )
+            delivered = sent.success()
             result = {
                 "leaseToken": delivery["leaseToken"],
-                "success": success,
-                "messageId": sent.data.message_id if success and sent.data else None,
-                "errorCode": None if success else f"FEISHU_{sent.code}",
+                "success": delivered,
+                "messageId": sent.data.message_id if delivered and sent.data else None,
+                "errorCode": None if delivered else f"FEISHU_{sent.code}",
             }
         except Exception as error:
             # Do not log raw SDK/HTTP errors: URLs and payloads can include credentials/content.
@@ -206,6 +222,7 @@ class Bridge:
         ack.raise_for_status()
 
     def pump(self):
+        self.cards = ProgressCards(self.config.spool_path + ".cards.db", self.sdk)
         self.reactions = Reactions(
             self.config.spool_path + ".reactions.db", self.sdk, self.config.app_id, self.bot_open_id
         )
@@ -219,6 +236,7 @@ class Bridge:
             self.reactions.pump_once()
             self.stop.wait(0.5)
         self.reactions.close()
+        self.cards.close()
 
     def run(self):
         bot_id = self.bot_id()

@@ -46,7 +46,13 @@ class Reactions:
         target = (
             ("Typing" if delivery.get("taskState") == "SUCCEEDED" else "CLEAR")
             if preparing
-            else STATES.get(delivery.get("taskState"))
+            else (
+                "THINKING"
+                if delivery.get("taskState") == "UPDATE_0"
+                else "Typing"
+                if delivery.get("taskState", "").startswith("UPDATE_")
+                else STATES.get(delivery.get("taskState"))
+            )
         )
         if preparing and delivery.get("taskState") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return

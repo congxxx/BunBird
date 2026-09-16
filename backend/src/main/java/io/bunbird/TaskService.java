@@ -91,7 +91,8 @@ public class TaskService {
                 taskId, tenant, topicId, in.senderId(), in.messageId(), text, now(), now());
         db.update("UPDATE ingress SET task_id=? WHERE id=?", taskId, ingressId);
         event(taskId, "QUEUED", "已受理，等待执行");
-        enqueue(taskId, in.messageId(), "已受理，任务 " + taskId + "。\n可发送 /status " + taskId + " 或 /cancel " + taskId + "。");
+        // A durable reaction-only delivery: no acknowledgement text is sent to the chat.
+        enqueue(taskId, in.messageId(), "");
         return Map.of("accepted", true, "taskId", taskId);
     }
 
@@ -207,7 +208,7 @@ public class TaskService {
             String token = id(), deliveryId = (String)row.get("id");
             if (db.update("UPDATE delivery SET status='SENDING',lease_token=?,available_at=?,attempts=attempts+1 WHERE id=? AND status IN ('PENDING','SENDING') AND available_at<=? AND attempts<5",
                     token, now()+60_000, deliveryId, now()) == 1)
-                return Map.of("deliveryId", deliveryId, "leaseToken", token, "replyTo", row.get("reply_to"), "content", row.get("content"), "replyInThread", row.get("reply_in_thread"), "taskState", Objects.toString(row.get("task_state"), ""));
+                return Map.of("deliveryId", deliveryId, "leaseToken", token, "replyTo", row.get("reply_to"), "content", row.get("content"), "replyInThread", row.get("reply_in_thread"), "taskState", Objects.toString(row.get("task_state"), ""), "taskId", Objects.toString(row.get("task_id"), ""));
         }
         return Map.of();
     }

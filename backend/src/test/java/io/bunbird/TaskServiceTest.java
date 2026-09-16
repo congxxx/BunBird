@@ -105,6 +105,20 @@ class TaskServiceTest {
         assertThatThrownBy(()->service.progress(id,new Progress(progress.leaseToken(),"WORKSPACE","preparing"))).hasMessageContaining("409");
         assertThat(service.deliveries(id)).hasSize(3);
     }
+
+    @Test void queuedDeliveryIsSilentAndProgressRevisionsAreIdempotent() {
+        String id=submit("progress","u","t","hello");
+        var queued=service.claimDelivery();
+        assertThat(queued).containsEntry("taskState","QUEUED").containsEntry("content", "").containsEntry("taskId",id);
+        var job=service.claim();
+        String token=(String)job.get("leaseToken");
+        service.progress(id,new Progress(token,"UPDATE_0","analyzing"));
+        service.progress(id,new Progress(token,"UPDATE_1","analyzing\nreading"));
+        service.progress(id,new Progress(token,"UPDATE_1","analyzing\nreading"));
+        assertThat(service.deliveries(id)).hasSize(3);
+        service.complete(id,success(job));
+        assertThatThrownBy(()->service.progress(id,new Progress(token,"UPDATE_2","late"))).hasMessageContaining("409");
+    }
     @Test void queuedCancellationCannotBeClaimed() {
         String id=submit("e","u","t","问题");
         service.cancel(id);

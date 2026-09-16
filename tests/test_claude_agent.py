@@ -105,7 +105,13 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
     assert "--session-id" in commands[0] and "--resume" in commands[1]
     assert job()["prompt"] not in commands[0]
     assert "PRIVATE" not in str(notices) and "do-not-forward" not in str(notices)
-    assert [phase for phase, _ in notices] == ["STARTED", "WORKSPACE", "WORKSPACE"]
+    assert [phase for phase, _ in notices] == [
+        "STARTED",
+        "UPDATE_0",
+        "UPDATE_1",
+        "UPDATE_0",
+        "UPDATE_1",
+    ]
 
 
 def test_worker_sends_natural_language_directly_to_agent():
