@@ -5,7 +5,7 @@ import sys
 import httpx
 import pytest
 
-from bunbird.claude_agent import ClaudeAgent, child_env, session_key
+from bunbird.claude_agent import ClaudeAgent, child_env, public_progress, session_key
 from bunbird.model import ModelConfig, ModelError
 from bunbird.worker import execute
 
@@ -60,10 +60,22 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
     events = [
         {"type": "system", "subtype": "init"},
         {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "<progress>PRIVATE</progress>"},
+            },
+        },
+        {
             "type": "assistant",
             "message": {
                 "content": [
-                    {"type": "thinking", "thinking": "PRIVATE"},
+                    {"type": "thinking", "thinking": "<progress>PRIVATE</progress>"},
+                    {
+                        "type": "text",
+                        "text": "<progress>已确认需要创建项目文件，"
+                        "接下来写入并检查内容。</progress>",
+                    },
                     {"type": "tool_use", "name": "Write", "input": {"secret": "do-not-forward"}},
                 ]
             },
@@ -105,6 +117,8 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
     assert "--session-id" in commands[0] and "--resume" in commands[1]
     assert job()["prompt"] not in commands[0]
     assert "PRIVATE" not in str(notices) and "do-not-forward" not in str(notices)
+    assert notices[2][1] == "已确认需要创建项目文件，接下来写入并检查内容。"
+    assert "正在创建文件" not in str(notices)
     assert [phase for phase, _ in notices] == [
         "STARTED",
         "UPDATE_0",
@@ -135,3 +149,9 @@ def test_worker_sends_natural_language_directly_to_agent():
     asyncio.run(scenario())
     assert received == ["/workspace anything without fixed syntax"]
     assert completed[0]["status"] == "SUCCEEDED"
+
+
+def test_only_explicit_public_summary_is_extracted():
+    assert public_progress("普通最终回答") == ""
+    assert public_progress("<progress>准备核对配置。</pro") == "准备核对配置。"
+    assert public_progress("<progress>已核对配置。</progress>最终结论") == "已核对配置。"
