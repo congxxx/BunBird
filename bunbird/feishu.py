@@ -95,7 +95,6 @@ def build_reply(delivery: dict) -> ReplyMessageRequest:
     styles = {
         "STARTED": ("🤖 BunBird 会话已启动", "blue"),
         "WORKSPACE": ("⌨️ 处理进度", "blue"),
-        "SUCCEEDED": ("✅ 完成", "green"),
         "FAILED": ("任务未完成", "red"),
         "CANCELLED": ("任务已取消", "grey"),
     }
@@ -108,25 +107,23 @@ def build_reply(delivery: dict) -> ReplyMessageRequest:
                 {"tag": "div", "text": {"tag": "plain_text", "content": delivery["content"]}}
             ],
         }
-        if delivery.get("taskState") == "SUCCEEDED":
-            # Render model Markdown, but never turn generated mention tags into notifications.
-            markdown = re.sub(
-                r"</?at\b[^>]*>",
-                lambda match: html.escape(match[0]),
-                delivery["content"],
-                flags=re.IGNORECASE,
-            )
-            content = {
-                "schema": "2.0",
-                "header": content["header"],
-                "body": {"elements": [{"tag": "markdown", "content": markdown}]},
-            }
+    message_type = "interactive" if style else "text"
+    if delivery.get("taskState") == "SUCCEEDED":
+        # A normal rich-text message preserves Markdown without a result-card wrapper.
+        markdown = re.sub(
+            r"</?at\b[^>]*>",
+            lambda match: html.escape(match[0]),
+            delivery["content"],
+            flags=re.IGNORECASE,
+        )
+        content = {"zh_cn": {"title": "", "content": [[{"tag": "md", "text": markdown}]]}}
+        message_type = "post"
     return (
         ReplyMessageRequest.builder()
         .message_id(delivery["replyTo"])
         .request_body(
             ReplyMessageRequestBody.builder()
-            .msg_type("interactive" if style else "text")
+            .msg_type(message_type)
             .content(json.dumps(content, ensure_ascii=False))
             .uuid(delivery["deliveryId"])
             .reply_in_thread(delivery.get("replyInThread", False))

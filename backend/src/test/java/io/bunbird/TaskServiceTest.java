@@ -76,6 +76,7 @@ class TaskServiceTest {
         service.complete(id,success(job));
         assertThat(service.events(id,0)).extracting(e->e.get("type")).containsExactly("QUEUED","RUNNING","SUCCEEDED");
         assertThat(service.deliveries(id)).hasSize(2);
+        assertThat(db.queryForObject("SELECT content FROM delivery WHERE task_id=? AND task_state='SUCCEEDED'",String.class,id)).isEqualTo("你好");
         var delivery=service.claimDelivery();
         service.delivered((String)delivery.get("deliveryId"),new Delivered((String)delivery.get("leaseToken"),false,null,"FEISHU_429"));
         assertThat(service.task(id).get("status")).isEqualTo("SUCCEEDED");

@@ -198,14 +198,14 @@ def test_progress_cards_preserve_thread_and_escape_content(state, color):
         }
     )
     body = request.request_body
-    assert body.msg_type == "interactive"
     card = json.loads(body.content)
-    assert card["header"]["template"] == color
     if state == "SUCCEEDED":
-        assert card["schema"] == "2.0"
-        assert card["body"]["elements"][0]["tag"] == "markdown"
-        assert "<at " not in card["body"]["elements"][0]["content"]
+        assert body.msg_type == "post"
+        assert "header" not in card
+        assert "<at " not in card["zh_cn"]["content"][0][0]["text"]
     else:
+        assert body.msg_type == "interactive"
+        assert card["header"]["template"] == color
         assert card["elements"][0]["text"]["tag"] == "plain_text"
     assert body.reply_in_thread is True
 
@@ -216,7 +216,8 @@ def test_result_markdown_preserves_formatting_and_code():
         {"replyTo": "om-root", "deliveryId": "uuid", "content": markdown, "taskState": "SUCCEEDED"}
     )
     card = json.loads(request.request_body.content)
-    assert card["body"]["elements"][0] == {"tag": "markdown", "content": markdown}
+    assert request.request_body.msg_type == "post"
+    assert card["zh_cn"]["content"][0][0] == {"tag": "md", "text": markdown}
 
 
 def test_control_failure_retains_event_without_sending(config, payload):

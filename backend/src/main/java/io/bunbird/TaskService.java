@@ -184,7 +184,7 @@ public class TaskService {
         event(taskId, result.status(), result.status().equals("SUCCEEDED") ? "模型回答完成" : Objects.toString(result.errorCode(), "MODEL_FAILED"));
         String body = result.status().equals("SUCCEEDED") ? result.result()
                 : "任务执行失败（" + Objects.toString(result.errorCode(), "MODEL_FAILED") + "），可稍后重新发送问题。";
-        enqueue(taskId, (String)task(taskId).get("message_id"), body + "\n\n任务 " + taskId);
+        enqueue(taskId, (String)task(taskId).get("message_id"), result.status().equals("SUCCEEDED") ? body : body + "\n\n任务 " + taskId);
         return Map.of("accepted", true);
     }
 

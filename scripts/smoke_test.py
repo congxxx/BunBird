@@ -285,8 +285,10 @@ def main():
                     assert [r.request_body.msg_type for r in sent[2:]] == [
                         "interactive",
                         "interactive",
-                        "interactive",
+                        "post",
                     ]
+                    final_post = json.loads(sent[-1].request_body.content)
+                    assert final_post["zh_cn"]["content"][0][0]["text"] == current["result"]
                     assert len(patched) == 1
                     assert "最终结论见下方消息" in patched[0].request_body.content
                     print(
