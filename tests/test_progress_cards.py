@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from bunbird.feishu import Bridge, build_reply
 from bunbird.inbox import Inbox
@@ -51,9 +52,10 @@ def test_progress_reuses_message_after_restart_and_closes_once(tmp_path):
     cards.close()
 
 
-def test_queued_delivery_only_enqueues_reaction(tmp_path):
+@pytest.mark.parametrize("state", ["QUEUED", "SUPERSEDED"])
+def test_queued_delivery_only_enqueues_reaction(tmp_path, state):
     delivery = {
-        "taskState": "QUEUED",
+        "taskState": state,
         "deliveryId": "queue",
         "leaseToken": "lease",
         "replyTo": "om-user",
@@ -75,6 +77,31 @@ def test_queued_delivery_only_enqueues_reaction(tmp_path):
     )
     bridge.pump_once()
     assert acks[0]["success"] and acks[0]["messageId"] is None
-    assert reactions[-1][0]["taskState"] == "QUEUED"
+    assert reactions[-1][0]["taskState"] == state
     bridge.inbox.close()
     bridge.http.close()
+
+
+def test_superseded_card_closes_without_final_result(tmp_path):
+    patches = []
+    sdk = SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(
+                message=SimpleNamespace(
+                    reply=lambda _: success("card"),
+                    patch=lambda request: patches.append(request) or success(),
+                )
+            )
+        )
+    )
+    cards = ProgressCards(tmp_path / "cards.db", sdk)
+    delivery = {"taskId": "old", "replyTo": "user", "deliveryId": "d", "content": "progress"}
+    cards.update(delivery, build_reply)
+    cards.finish({**delivery, "taskState": "SUPERSEDED"})
+    cards.update(delivery, build_reply)
+    assert len(patches) == 1
+    assert (
+        "新消息中断"
+        in json.loads(patches[0].request_body.content)["elements"][0]["text"]["content"]
+    )
+    cards.close()

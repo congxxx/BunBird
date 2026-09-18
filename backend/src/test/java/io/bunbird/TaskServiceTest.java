@@ -136,7 +136,7 @@ class TaskServiceTest {
     @Test void sameTopicSerializesAndHistoryDoesNotCrossTopics() {
         String first=submit("e1","u","t","第一问");
         var job=service.claim();
-        submit("e2","u","t","第二问");
+        submit("e2","other-user","t","第二问");
         assertThat(service.claim()).isEmpty();
         String other=submit("e3","u","other-topic","另外的话题");
         var separate=service.claim();
@@ -145,6 +145,41 @@ class TaskServiceTest {
         service.complete(first,success(job));
         var followup=service.claim();
         assertThat((List<?>)followup.get("history")).hasSize(1);
+    }
+    @Test void newestMessageFencesOldRunAndWaitsForProcessCleanup() throws Exception {
+        String first=submit("first","u","t","old");
+        var job=service.claim();
+        String token=(String)job.get("leaseToken");
+        service.progress(first,new Progress(token,"UPDATE_0","old progress"));
+        String second=submit("second","u","t","new");
+        String latest=submit("latest","u","t","newest");
+        assertThat(service.task(first)).containsEntry("status","CANCELLED").containsEntry("error_code","SUPERSEDED");
+        assertThat(service.task(second)).containsEntry("status","CANCELLED");
+        assertThat(service.heartbeat(first,token)).containsEntry("active",false);
+        assertThatThrownBy(()->service.complete(first,success(job))).hasMessageContaining("409");
+        assertThatThrownBy(()->service.progress(first,new Progress(token,"UPDATE_1","late"))).hasMessageContaining("409");
+        assertThat(service.claim()).isEmpty();
+        service.stopped(first,"wrong-token");
+        assertThat(service.claim()).isEmpty();
+        // A redelivered old event must not supersede the latest message.
+        mvc.perform(post("/internal/bridge/events").header("Authorization",BRIDGE)
+            .contentType("application/json").content(json.writeValueAsBytes(message("first","u","t","old"))))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.duplicate").value(true));
+        service.stopped(first,token);
+        assertThat(service.claim()).containsEntry("taskId",latest);
+        assertThat(service.claimDelivery()).containsEntry("taskState","SUPERSEDED").containsEntry("content","");
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM delivery WHERE task_id=? AND task_state='UPDATE_0' AND status='PENDING'",Integer.class,first)).isZero();
+    }
+    @Test void supersessionDoesNotCrossUsersTopicsOrCommandsAndRecoversLostWorker() {
+        String first=submit("first","u","t","old");
+        service.claim();
+        submit("status","u","t","/status");
+        submit("other-user","v","t","other");
+        submit("other-topic","u","separate","other");
+        assertThat(service.task(first)).containsEntry("status","RUNNING");
+        submit("new","u","t","replacement");
+        db.update("UPDATE task SET lease_until=0 WHERE id=?",first);
+        assertThat(service.claim()).isNotEmpty();
     }
     @Test void simultaneousWorkersCannotClaimSameTopic() throws Exception {
         submit("e1","u","t","第一问"); submit("e2","u","t","第二问");

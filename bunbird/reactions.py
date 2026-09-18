@@ -22,6 +22,7 @@ STATES = {
     "SUCCEEDED": "DONE",
     "FAILED": "CLEAR",
     "CANCELLED": "CLEAR",
+    "SUPERSEDED": "CLEAR",
 }
 
 
@@ -54,7 +55,12 @@ class Reactions:
                 else STATES.get(delivery.get("taskState"))
             )
         )
-        if preparing and delivery.get("taskState") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        if preparing and delivery.get("taskState") not in {
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "SUPERSEDED",
+        }:
             return
         if target:
             key = delivery["deliveryId"] + (":preparing" if preparing else ":sent")

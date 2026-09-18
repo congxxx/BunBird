@@ -21,7 +21,7 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
 
     async def monitor():
         while True:
-            await asyncio.sleep(3)
+            await asyncio.sleep(0.25)
             try:
                 response = await http.post(root + "/heartbeat", json={"leaseToken": token})
                 response.raise_for_status()
@@ -136,6 +136,9 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        # Only release the session after the agent and its subprocesses have stopped.
+        with contextlib.suppress(httpx.HTTPError):
+            await http.post(root + "/stopped", json={"leaseToken": token}, timeout=3)
 
 
 async def run(config: ControlConfig, model: Model):

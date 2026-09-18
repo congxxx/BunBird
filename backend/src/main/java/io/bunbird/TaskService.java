@@ -80,6 +80,17 @@ public class TaskService {
             } else enqueue(null, in.messageId(), "未知命令，发送 /help 查看帮助。");
             return Map.of("accepted", true, "command", true);
         }
+        // The topic lock makes replacement atomic with receive/claim. Retain the old
+        // lease until the worker acknowledges process cleanup (or its lease expires).
+        for (var old : db.queryForList("SELECT id,message_id FROM task WHERE tenant_id=? AND topic_id=? AND sender_id=? AND status IN ('QUEUED','RUNNING')", tenant, topicId, in.senderId())) {
+            String oldId = (String) old.get("id");
+            if (db.update("UPDATE task SET status='CANCELLED',error_code='SUPERSEDED',updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING')", now(), oldId) == 0) continue;
+            event(oldId, "SUPERSEDED", "已被同一会话的新消息中断");
+            // Drop unsent stale progress, but let an in-flight delivery finish before closing its card.
+            db.update("UPDATE delivery SET status='FAILED',error_code='TASK_SUPERSEDED' WHERE task_id=? AND status='PENDING'", oldId);
+            enqueue(oldId, (String) old.get("message_id"), "");
+            db.update("UPDATE delivery SET task_state='SUPERSEDED' WHERE task_id=? AND status='PENDING'", oldId);
+        }
         // Bound the queue for the small, single-tenant pilot.
         Integer waiting = db.queryForObject("SELECT COUNT(*) FROM task WHERE tenant_id=? AND status IN ('QUEUED','RUNNING')", Integer.class, tenant);
         if (waiting != null && waiting >= 100) {
@@ -130,7 +141,7 @@ public class TaskService {
         for (var candidate : candidates) {
             String topicId = (String)candidate.get("topic_id"), taskId = (String)candidate.get("id");
             db.queryForList("SELECT id FROM topic WHERE id=? FOR UPDATE", topicId);
-            if (db.queryForObject("SELECT COUNT(*) FROM task WHERE topic_id=? AND status='RUNNING'", Integer.class, topicId) > 0) continue;
+            if (db.queryForObject("SELECT COUNT(*) FROM task WHERE topic_id=? AND (status='RUNNING' OR (status='CANCELLED' AND lease_until>?))", Integer.class, topicId, now()) > 0) continue;
             String token = id();
             if (db.update("UPDATE task SET status='RUNNING',lease_token=?,lease_until=?,deadline=?,updated_at=? WHERE id=? AND status='QUEUED'",
                     token, now()+LEASE_MS, now()+DEADLINE_MS, now(), taskId) == 0) continue;
@@ -141,6 +152,12 @@ public class TaskService {
             return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant, "topicId", topicId, "senderId", task.get("sender_id"));
         }
         return Map.of();
+    }
+
+    @Transactional
+    public Map<String, Object> stopped(String taskId, String token) {
+        db.update("UPDATE task SET lease_token=NULL,lease_until=NULL WHERE id=? AND tenant_id=? AND lease_token=? AND status='CANCELLED'", taskId, tenant, token);
+        return Map.of("accepted", true);
     }
 
     @Transactional

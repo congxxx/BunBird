@@ -180,7 +180,9 @@ class Bridge:
             self.reactions.pump_once(delivery["replyTo"])
         try:
             state = delivery.get("taskState", "")
-            if state == "QUEUED":
+            if state == "SUPERSEDED":
+                sent = self.cards.finish(delivery) if hasattr(self, "cards") else success()
+            elif state == "QUEUED":
                 sent = success()
             elif hasattr(self, "cards") and (state.startswith("UPDATE_") or state == "WORKSPACE"):
                 sent = self.cards.update(delivery, build_reply)

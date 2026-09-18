@@ -155,6 +155,8 @@ def test_worker_completion_and_retry_does_not_repeat_model():
     completed = []
 
     def handler(request):
+        if not request.url.path.endswith("/complete"):
+            return httpx.Response(200, json={"active": True})
         completed.append(json.loads(request.content))
         return httpx.Response(503 if len(completed) == 1 else 200, json={"accepted": True})
 
@@ -185,6 +187,8 @@ def test_cancel_or_control_loss_aborts_model_without_completion(control_status):
     paths, cancelled = [], []
 
     def handler(request):
+        if request.url.path.endswith("/stopped"):
+            assert cancelled == [True]
         paths.append(request.url.path)
         return httpx.Response(control_status, json={"active": False})
 
@@ -199,8 +203,8 @@ def test_cancel_or_control_loss_aborts_model_without_completion(control_status):
         async with httpx.AsyncClient(
             base_url="http://control", transport=httpx.MockTransport(handler)
         ) as http:
-            await asyncio.wait_for(execute(http, SlowModel(), job()), timeout=6)
+            await asyncio.wait_for(execute(http, SlowModel(), job()), timeout=2)
 
     asyncio.run(scenario())
     assert cancelled == [True]
-    assert paths == ["/internal/worker/tasks/task/heartbeat"]
+    assert paths == ["/internal/worker/tasks/task/heartbeat", "/internal/worker/tasks/task/stopped"]

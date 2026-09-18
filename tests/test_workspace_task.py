@@ -107,7 +107,7 @@ def test_worker_routes_real_workspace_without_model(registered):
     asyncio.run(scenario())
     progress = [body["phase"] for path, body in calls if path.endswith("/progress")]
     assert progress == ["STARTED", "WORKSPACE"]
-    result = calls[-1][1]
+    result = next(body for path, body in calls if path.endswith("/complete"))
     assert result["status"] == "SUCCEEDED"
     assert "提交：未执行" in result["result"]
     assert Workspaces(registered[0], "tenant-test").list()[0]["state"] == "READY"

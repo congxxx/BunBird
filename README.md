@@ -97,3 +97,10 @@ uv run python scripts/smoke_test.py
 `backend/` 为 Java 管理服务与数据库迁移，`bunbird/` 为 Python 连接器和 Worker，`tests/` 为 Python 测试，`scripts/` 为配置、启动与跨进程验证脚本，`docs/` 为接入和验证材料。Python 依赖通过 `uv.lock` 固定，Java 依赖由固定 Spring Boot 3.5.16 BOM 和 Maven 配置管理。
 
 飞书适配复用官方 [larksuite/oapi-sdk-python](https://github.com/larksuite/oapi-sdk-python)，固定 `lark-oapi==1.7.3`（MIT）；Spring Boot、HTTPX、H2、PostgreSQL 等保持各自许可证。任务状态、权限边界、持久收件队列、通知 outbox 与 Worker 协议由本项目实现。本版未复制 cc-connect、OpenHands 或 SkillHub 源码，也未声称已经接入这些项目。
+
+
+## 新消息中断当前任务
+
+同一用户在同一群话题或私聊内发送新的任务消息，会中断正在执行的旧任务，并替换尚未执行的旧消息；连续发送时以最后一条为准。群内另起话题仍是独立会话，其他用户的任务不受影响，`/status`、`/help` 等命令不会触发替换。工作区与 Claude 会话保留，已经发生的文件修改不会自动回滚。
+
+控制服务接收新消息后立即拒绝旧任务的进展和结果，Worker 每 250 毫秒检查取消状态，终止旧 Agent 进程树后才释放会话并领取新任务。若 Worker 失联，新任务等待原租约到期后可领取。旧进展卡片标记为被新消息中断，不额外发送取消消息；新任务继续使用状态表情、进展摘要和普通 Markdown 结果消息。

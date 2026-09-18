@@ -155,3 +155,69 @@ def test_only_explicit_public_summary_is_extracted():
     assert public_progress("普通最终回答") == ""
     assert public_progress("<progress>准备核对配置。</pro") == "准备核对配置。"
     assert public_progress("<progress>已核对配置。</progress>最终结论") == "已核对配置。"
+
+
+def test_preemption_kills_process_tree_before_resuming_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_SESSION_ROOT", str(tmp_path / "sessions"))
+    monkeypatch.setattr("bunbird.claude_agent.shutil.which", lambda _: sys.executable)
+    agent = ClaudeAgent(ModelConfig("anthropic", "test", "https://test", "test-key"))
+    monkeypatch.setattr(agent, "workspace", lambda folder, *_: folder)
+    ready = tmp_path / "ready"
+    leaked = tmp_path / "leaked"
+    script = tmp_path / "fake_agent.py"
+    script.write_text(
+        "import sys, json, subprocess, time\n"
+        "from pathlib import Path\n"
+        "prompt = sys.stdin.read()\n"
+        "print(json.dumps({'type':'system','subtype':'init'}), flush=True)\n"
+        "if prompt == 'old':\n"
+        "    subprocess.Popen([sys.executable, '-c', "
+        + repr(
+            "from pathlib import Path; import time; Path("
+            + repr(str(ready))
+            + ").touch(); time.sleep(2); Path("
+            + repr(str(leaked))
+            + ").touch()"
+        )
+        + "])\n"
+        "    time.sleep(60)\n"
+        "else:\n"
+        "    print(json.dumps({'type':'result','result':'new answer',"
+        "'is_error':False}), flush=True)\n",
+        encoding="utf-8",
+    )
+    original = asyncio.create_subprocess_exec
+    processes, commands, completed = [], [], []
+
+    async def spawn(*args, **kwargs):
+        if "--output-format" not in args:
+            return await original(*args, **kwargs)
+        commands.append(args)
+        process = await original(sys.executable, str(script), **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    def handler(request):
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={"active": not ready.exists()})
+        if request.url.path.endswith("/stopped"):
+            assert all(p.returncode is not None for p in processes)
+        if request.url.path.endswith("/complete"):
+            completed.append(json.loads(request.content))
+        return httpx.Response(200, json={"accepted": True})
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            base_url="http://control", transport=httpx.MockTransport(handler)
+        ) as http:
+            await asyncio.wait_for(execute(http, agent, job(prompt="old")), timeout=8)
+            assert ready.exists() and completed == []
+            await asyncio.wait_for(execute(http, agent, job(taskId="new", prompt="new")), timeout=8)
+            await asyncio.sleep(2.2)
+
+    asyncio.run(scenario())
+    assert not leaked.exists(), "old agent child must not keep executing after preemption"
+    assert "--resume" in commands[1] and commands[0][-1] == commands[1][-1]
+    assert [result["result"] for result in completed] == ["new answer"]

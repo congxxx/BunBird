@@ -76,6 +76,8 @@ class ProgressCards:
         text = (
             "✅ 本回合已完成，最终结论见下方消息。"
             if state == "SUCCEEDED"
+            else "已被新消息中断，正在处理最新请求。"
+            if state == "SUPERSEDED"
             else "本回合已取消。"
             if state == "CANCELLED"
             else "本回合未完成，原因见下方消息。"
