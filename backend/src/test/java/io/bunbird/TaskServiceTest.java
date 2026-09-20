@@ -264,4 +264,34 @@ class TaskServiceTest {
         service.delivered((String)accepted.get("deliveryId"),new Delivered((String)accepted.get("leaseToken"),true,"om-ack",null));
         assertThat(service.claimDelivery()).containsEntry("taskState","SUCCEEDED");
     }
+
+    @Test void dashboardSeparatesCacheUsageAndDoesNotExposeTaskContent() throws Exception {
+        String a=submit("usage-a","u","a","private prompt sentinel");
+        String b=submit("usage-b","u","b","private prompt sentinel");
+        submit("usage-unknown","u","unknown","private prompt sentinel");
+        db.update("UPDATE task SET status='SUCCEEDED',model='anthropic-test',result='private result sentinel',usage_json=? WHERE id=?",
+            "{\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}",a);
+        db.update("UPDATE task SET status='SUCCEEDED',model='compatible-test',usage_json=? WHERE id=?",
+            "{\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":50}}",b);
+        var result=mvc.perform(get("/api/dashboard?days=7").header("Authorization","Bearer admin-012345678901234567890123456789"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.tasks").value(3))
+            .andExpect(jsonPath("$.reportedTasks").value(2)).andExpect(jsonPath("$.usage.total").value(300))
+            .andExpect(jsonPath("$.usage.cacheRead").value(80)).andExpect(jsonPath("$.daily.length()").value(7))
+            .andExpect(jsonPath("$.accounts[0].quotaStatus").value("UNKNOWN"))
+            .andReturn().getResponse().getContentAsString();
+        assertThat(result).doesNotContain("private prompt sentinel","private result sentinel","usage_json","lease_token");
+    }
+
+    @Test void dashboardRequiresAdminButStaticLoginPageIsPublic() throws Exception {
+        mvc.perform(get("/dashboard.html")).andExpect(status().isOk());
+        mvc.perform(get("/dashboard.js")).andExpect(status().isOk());
+        mvc.perform(get("/api/dashboard")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/dashboard").header("Authorization",WORKER)).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/dashboard?days=-1").header("Authorization","Bearer admin-012345678901234567890123456789"))
+            .andExpect(status().isBadRequest());
+        String other=submit("other-tenant","u","t","private");
+        db.update("UPDATE task SET tenant_id='different' WHERE id=?",other);
+        mvc.perform(get("/api/dashboard").header("Authorization","Bearer admin-012345678901234567890123456789"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.tasks").value(0));
+    }
 }

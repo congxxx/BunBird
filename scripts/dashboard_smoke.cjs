@@ -1,0 +1,54 @@
+// Run with Playwright available in NODE_PATH. All API responses below are synthetic.
+const { chromium } = require('playwright');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const base = path.resolve(__dirname, '../backend/src/main/resources/static');
+(async () => {
+  const browser = await chromium.launch({channel:'msedge', headless:true});
+  try {
+    const page = await browser.newPage({viewport:{width:1440,height:1100}});
+    const errors=[]; page.on('pageerror', e=>errors.push(e.message));
+    const usage={input:12000,output:3000,cacheRead:6000,cacheWrite:1000,total:22000};
+    let requestedDays;
+    await page.route('http://bunbird.test/**', async route => {
+      const url=new URL(route.request().url());
+      if(url.pathname==='/api/dashboard') {
+        if(route.request().headers().authorization!=='Bearer synthetic-admin')
+          return route.fulfill({status:401,json:{error:'unauthorized'}});
+        requestedDays=url.searchParams.get('days');
+        return route.fulfill({json:{days:30,tasks:4,reportedTasks:3,usage,
+          statuses:{SUCCEEDED:3,CANCELLED:1},generatedAt:Date.now(),
+          daily:Array.from({length:30},(_,i)=>({date:`2026-09-${String(i+1).padStart(2,'0')}`,usage:{...usage,total:i%5*4200}})),
+          models:[{model:'MiniMax-M3',usage}],
+          accounts:[{name:'当前环境配置',model:'MiniMax-M3',executor:'claude'}],
+          recent:[{id:'synthetic-task',status:'SUCCEEDED',model:'<img src=x onerror=alert(1)>',created_at:Date.now(),usage},
+            {id:'missing-usage',status:'CANCELLED',created_at:Date.now()}]}});
+      }
+      const filename=path.basename(url.pathname);
+      if(!['dashboard.html','dashboard.css','dashboard.js'].includes(filename))return route.fulfill({status:404});
+      return route.fulfill({body:fs.readFileSync(path.join(base,filename)),
+        contentType:filename.endsWith('.html')?'text/html; charset=utf-8':filename.endsWith('.css')?'text/css':'text/javascript; charset=utf-8'});
+    });
+    await page.goto('http://bunbird.test/dashboard.html');
+    await page.locator('#token').fill('wrong'); await page.locator('#login button').click();
+    await page.locator('#error').waitFor({state:'visible'});
+    await page.locator('#token').fill('synthetic-admin'); await page.locator('#login button').click();
+    await page.locator('#content').waitFor({state:'visible'});
+    assert.equal(await page.locator('#total').textContent(),'22,000');
+    assert.equal(await page.locator('#task-list img').count(),0);
+    assert.match(await page.locator('#task-list').textContent(),/未上报/);
+    await page.locator('#days').selectOption('7');
+    await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.equal(requestedDays,'7');
+    assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
+    fs.mkdirSync(path.resolve(__dirname,'../data'),{recursive:true});
+    await page.screenshot({path:path.resolve(__dirname,'../data/dashboard-preview.png'),fullPage:true});
+    await page.setViewportSize({width:390,height:844});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.locator('#logout').click();
+    assert.equal(await page.locator('#login').isVisible(),true);
+    assert.deepEqual(errors,[]);
+    console.log('PASS: login, auth failure, usage rendering, date filter, XSS escaping, mobile layout, logout');
+  } finally { await browser.close(); }
+})().catch(e=>{console.error(e);process.exitCode=1;});

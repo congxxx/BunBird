@@ -12,6 +12,7 @@
 | Worker | `POST /internal/worker/tasks/{id}/stopped` | 进程清理后释放已取消任务的会话租约 |
 | Worker | `POST /internal/worker/tasks/{id}/complete` | 使用有效租约提交成功或失败 |
 | 管理员 | `GET /api/tasks` | 最近 100 个任务摘要 |
+| 管理员 | `GET /api/dashboard?days=30` | 7／30／90 天已记录用量、模型统计和脱敏任务摘要 |
 | 管理员 | `GET /api/tasks/{id}` | 任务详情、答案、模型及用量 |
 | 管理员 | `GET /api/tasks/{id}/events?after=0` | 大于指定序号的最多 200 条事件 |
 | 管理员 | `GET /api/tasks/{id}/deliveries` | 发送状态与飞书消息 ID |

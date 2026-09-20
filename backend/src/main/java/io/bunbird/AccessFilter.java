@@ -31,6 +31,8 @@ public class AccessFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
             throws ServletException, IOException {
         String path = req.getRequestURI();
+        if (Set.of("/dashboard.html", "/dashboard.css", "/dashboard.js").contains(path)
+                && req.getMethod().equals("GET")) { chain.doFilter(req, res); return; }
         if (path.equals("/health") && req.getMethod().equals("GET")) { chain.doFilter(req, res); return; }
         String expected = path.startsWith("/internal/worker/") ? worker
                 : path.startsWith("/internal/bridge/") ? bridge : admin;
