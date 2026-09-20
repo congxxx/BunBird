@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const fmt = n => new Intl.NumberFormat("zh-CN").format(n);
 const stateNames = {QUEUED:"排队中",RUNNING:"执行中",SUCCEEDED:"已完成",FAILED:"失败",CANCELLED:"已中断"};
-let credential = "", pending = false, generation = 0;
+let credential = "", pending = false, generation = 0, quotaPending = false;
 function text(id, value) { $(id).textContent = value; }
 function node(tag, value, className) { const el=document.createElement(tag); if(value!=null)el.textContent=value; if(className)el.className=className; return el; }
 function render(data) {
@@ -16,7 +16,7 @@ function render(data) {
   $("bars").setAttribute("aria-label",data.daily.map(d=>`${d.date} ${d.usage.total} Token`).join("；"));
   $("models").replaceChildren();data.models.forEach(m=>{const row=node("div",null,"model-row");row.append(node("span",m.model),node("b",fmt(m.usage.total)));$("models").append(row);});
   if(!data.models.length)$("models").append(node("p","暂无已上报的用量","muted"));
-  $("account-list").replaceChildren();data.accounts.forEach(a=>{const item=node("article",null,"panel account");const main=node("div");main.append(node("h2",a.name),node("p",`${a.executor} · ${a.model}`));const meta=node("div",null,"account-meta");meta.append(node("span","环境配置","pill"),node("div","剩余额度：未知 · 自动切换：未启用"));item.append(main,meta);$("account-list").append(item);});
+  $("account-list").replaceChildren();data.accounts.forEach(a=>{const item=node("article",null,"panel account");const main=node("div");main.append(node("h2",a.name),node("p",`${a.executor} · ${a.model}`));const meta=node("div",null,"account-meta");meta.append(node("span","环境配置","pill"),node("div","套餐额度见下方 · 自动切换：未启用"));item.append(main,meta);$("account-list").append(item);});
   $("task-list").replaceChildren();data.recent.forEach(t=>{const row=node("tr");row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})));const id=node("td",t.id.slice(0,8));id.title=t.id;row.append(id,node("td",t.model||"—"));const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));row.append(status,node("td",t.usage?fmt(t.usage.total):"未上报"));$("task-list").append(row);});
   if(!data.recent.length){const row=node("tr"),cell=node("td","这段时间还没有任务");cell.colSpan=5;row.append(cell);$("task-list").append(row);}
   text("updated",`更新于 ${new Date(data.generatedAt).toLocaleTimeString("zh-CN")} · 每 15 秒自动刷新`);
@@ -25,7 +25,7 @@ async function refresh() {
   if(!credential||pending)return;pending=true;$("refresh").disabled=true;const version=generation;
   try { const res=await fetch(`/api/dashboard?days=${$("days").value}`,{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
     if(!res.ok)throw new Error(res.status===401?"凭据无效，请检查管理员凭据。":"管理服务暂时不可用，请稍后刷新。");
-    const data=await res.json();if(version!==generation)return;render(data);$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
+    const data=await res.json();if(version!==generation)return;render(data);refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
   } catch(e) {if(version!==generation)return;text("error",e.name==="TimeoutError"?"请求超时，请检查本地服务。":e.message);$("error").hidden=false;text("connection","连接异常");$("connection").classList.remove("online");}
   finally {pending=false;$("refresh").disabled=false;}
 }
@@ -33,3 +33,30 @@ $("login").addEventListener("submit",e=>{e.preventDefault();credential=$("token"
 $("refresh").addEventListener("click",refresh);$("days").addEventListener("change",refresh);
 $("logout").addEventListener("click",()=>{credential="";generation++;$("content").hidden=true;$("login").hidden=false;$("error").hidden=true;text("connection","尚未连接");$("connection").classList.remove("online");});
 setInterval(()=>{if(!document.hidden)refresh();},15000);
+
+function renderQuota(data) {
+  const panel=$("quota");panel.replaceChildren(node("h2","套餐额度 · "+(data.plan||"官方查询")));
+  if(data.message)panel.append(node("p",data.message,"note"));
+  if(data.checkedAt)panel.append(node("p",`官方数据更新于 ${new Date(data.checkedAt).toLocaleString("zh-CN")}${data.status==="STALE"?" · 数据已过期":""}`,"muted"));
+  const grid=node("div",null,"quota-grid");
+  (data.windows||[]).forEach(w=>{
+    const card=node("article",null,"quota-window");
+    card.append(node("p",`${w.model} · ${w.kind==="weekly"?"周额度":"短周期额度"}`,"muted"));
+    card.append(node("strong",`剩余 ${w.remainingPercent}%`));
+    const progress=node("progress");progress.max=100;progress.value=w.remainingPercent;
+    progress.setAttribute("aria-label",`${w.model} 剩余额度 ${w.remainingPercent}%`);card.append(progress);
+    if(w.resetsAt)card.append(node("p",`重置：${new Date(w.resetsAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})}（北京时间）`,"note"));
+    if(w.resetsAt&&w.startsAt&&w.resetsAt>w.startsAt)card.append(node("small",`实际窗口 ${Math.round((w.resetsAt-w.startsAt)/3600000*10)/10} 小时`,"muted"));
+    grid.append(card);
+  });panel.append(grid);
+}
+async function refreshQuota() {
+  if(!credential||quotaPending)return;quotaPending=true;const version=generation;
+  try {
+    const res=await fetch("/api/quota",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(12000)});
+    if(!res.ok)throw new Error("unavailable");
+    const data=await res.json();if(version===generation)renderQuota(data);
+  } catch {
+    if(version===generation)renderQuota({message:"套餐额度暂时无法查询，请稍后刷新。"});
+  } finally {quotaPending=false;}
+}

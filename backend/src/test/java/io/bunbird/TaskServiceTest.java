@@ -286,6 +286,8 @@ class TaskServiceTest {
         mvc.perform(get("/dashboard.html")).andExpect(status().isOk());
         mvc.perform(get("/dashboard.js")).andExpect(status().isOk());
         mvc.perform(get("/api/dashboard")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/quota")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/quota").header("Authorization",WORKER)).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/dashboard").header("Authorization",WORKER)).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/dashboard?days=-1").header("Authorization","Bearer admin-012345678901234567890123456789"))
             .andExpect(status().isBadRequest());

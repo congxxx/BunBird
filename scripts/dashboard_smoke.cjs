@@ -13,6 +13,7 @@ const base = path.resolve(__dirname, '../backend/src/main/resources/static');
     let requestedDays;
     await page.route('http://bunbird.test/**', async route => {
       const url=new URL(route.request().url());
+      if(url.pathname==='/api/quota') return route.fulfill({json:{status:'AVAILABLE',plan:'Token Plan',checkedAt:Date.now(),windows:[{model:'general',kind:'interval',remainingPercent:83,startsAt:1789905600000,resetsAt:1789920000000},{model:'general',kind:'weekly',remainingPercent:97}]}});
       if(url.pathname==='/api/dashboard') {
         if(route.request().headers().authorization!=='Bearer synthetic-admin')
           return route.fulfill({status:401,json:{error:'unauthorized'}});
@@ -36,6 +37,8 @@ const base = path.resolve(__dirname, '../backend/src/main/resources/static');
     await page.locator('#token').fill('synthetic-admin'); await page.locator('#login button').click();
     await page.locator('#content').waitFor({state:'visible'});
     assert.equal(await page.locator('#total').textContent(),'22,000');
+    await page.getByText('剩余 83%',{exact:true}).waitFor();
+    assert.match(await page.locator('#quota').textContent(),/实际窗口 4 小时/);
     assert.equal(await page.locator('#task-list img').count(),0);
     assert.match(await page.locator('#task-list').textContent(),/未上报/);
     await page.locator('#days').selectOption('7');
