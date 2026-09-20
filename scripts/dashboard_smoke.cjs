@@ -24,7 +24,7 @@ const base = path.resolve(__dirname, '../backend/src/main/resources/static');
           models:[{model:'MiniMax-M3',usage}],
           accounts:[{name:'当前环境配置',model:'MiniMax-M3',executor:'claude'}],
           recent:[{id:'synthetic-task',status:'SUCCEEDED',model:'<img src=x onerror=alert(1)>',created_at:Date.now(),usage},
-            {id:'missing-usage',status:'CANCELLED',created_at:Date.now()}]}});
+            {id:'missing-usage',status:'WAITING_QUOTA',pause_reason:'QUOTA_WEEKLY_EXHAUSTED',resume_at:Date.now()+3600000,created_at:Date.now()}]}});
       }
       const filename=path.basename(url.pathname);
       if(!['dashboard.html','dashboard.css','dashboard.js'].includes(filename))return route.fulfill({status:404});
@@ -41,6 +41,8 @@ const base = path.resolve(__dirname, '../backend/src/main/resources/static');
     assert.match(await page.locator('#quota').textContent(),/实际窗口 4 小时/);
     assert.equal(await page.locator('#task-list img').count(),0);
     assert.match(await page.locator('#task-list').textContent(),/未上报/);
+    assert.match(await page.locator('#task-list').textContent(),/周额度已耗尽/);
+    assert.match(await page.locator('#task-list').textContent(),/恢复（北京时间）/);
     await page.locator('#days').selectOption('7');
     await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.equal(requestedDays,'7');

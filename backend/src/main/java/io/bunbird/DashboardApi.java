@@ -30,7 +30,7 @@ public class DashboardApi {
         var zone=ZoneId.of("Asia/Shanghai");
         var today=LocalDate.now(zone);
         long since=today.minusDays(days-1).atStartOfDay(zone).toInstant().toEpochMilli();
-        var rows=db.queryForList("SELECT id,status,model,usage_json,error_code,created_at,updated_at FROM task WHERE tenant_id=? AND created_at>=? ORDER BY position DESC",tenant,since);
+        var rows=db.queryForList("SELECT id,status,model,usage_json,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? AND created_at>=? ORDER BY position DESC",tenant,since);
         var daily=new LinkedHashMap<String,long[]>();
         for (int i=days-1;i>=0;i--) daily.put(today.minusDays(i).toString(),new long[5]);
         var statuses=new TreeMap<String,Integer>();
@@ -51,7 +51,7 @@ public class DashboardApi {
             }
             if (recent.size()<100) {
                 var item=new LinkedHashMap<String,Object>();
-                for(String key:List.of("id","status","model","error_code","created_at","updated_at")) item.put(key,row.get(key));
+                for(String key:List.of("id","status","model","error_code","pause_reason","resume_at","created_at","updated_at")) item.put(key,row.get(key));
                 item.put("usage",usage==null?null:metrics(usage));
                 recent.add(item);
             }

@@ -146,7 +146,7 @@ async def run(config: ControlConfig, model: Model):
     async with async_client(config) as http:
         while True:
             try:
-                response = await http.post("/internal/worker/claim")
+                response = await http.post("/internal/worker/claim", timeout=15)
                 response.raise_for_status()
                 job = response.json()
                 if job:

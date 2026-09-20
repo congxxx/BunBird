@@ -1,0 +1,2 @@
+ALTER TABLE task ADD COLUMN pause_reason VARCHAR(64);
+ALTER TABLE task ADD COLUMN resume_at BIGINT;

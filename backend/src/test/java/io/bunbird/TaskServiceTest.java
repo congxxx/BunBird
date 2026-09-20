@@ -29,8 +29,10 @@ class TaskServiceTest {
     @Autowired JdbcTemplate db;
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
+    @org.springframework.test.context.bean.override.mockito.MockitoBean QuotaService quota;
 
     @BeforeEach void clear() {
+        org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","UNSUPPORTED"));
         for (String table : List.of("delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
     }
     Incoming message(String event, String user, String topic, String text) {
@@ -295,5 +297,53 @@ class TaskServiceTest {
         db.update("UPDATE task SET tenant_id='different' WHERE id=?",other);
         mvc.perform(get("/api/dashboard").header("Authorization","Bearer admin-012345678901234567890123456789"))
             .andExpect(status().isOk()).andExpect(jsonPath("$.tasks").value(0));
+    }
+
+    @Test void quotaWaitIsDurableDeduplicatedAndResumesOnlyAfterPositiveCheck() {
+        String id=submit("quota","u","t","hello");
+        long reset=System.currentTimeMillis()+3600000;
+        var blocked=new QuotaAdmission("BLOCK","QUOTA_WEEKLY_EXHAUSTED",reset);
+        assertThat(service.claim(blocked)).isEmpty();
+        assertThat(service.claim(blocked)).isEmpty();
+        assertThat(service.task(id)).containsEntry("status","WAITING_QUOTA").containsEntry("resume_at",reset);
+        assertThat(service.deliveries(id)).hasSize(2);
+        service.expire();
+        assertThat(service.task(id)).containsEntry("status","WAITING_QUOTA");
+        assertThat(service.claim(QuotaAdmission.unknown())).isEmpty();
+        assertThat(service.task(id)).containsEntry("pause_reason","QUOTA_UNCONFIRMED");
+        assertThat(service.deliveries(id)).hasSize(2);
+        var job=service.claim(QuotaAdmission.allow());
+        assertThat(job).containsEntry("taskId",id);
+        service.complete(id,success(job));
+        assertThat(service.claim(blocked)).isEmpty();
+        assertThat(service.events(id,0)).extracting(e->e.get("type")).containsExactly("QUEUED","WAITING_QUOTA","QUOTA_RESUMED","RUNNING","SUCCEEDED");
+    }
+
+    @Test void newMessagesAndCancelReplaceQuotaWaitAndUnknownDoesNotMeanExhausted() {
+        String old=submit("old-quota","u","t","old");
+        var blocked=new QuotaAdmission("BLOCK","QUOTA_INTERVAL_EXHAUSTED",null);
+        service.claim(blocked);
+        String latest=submit("latest-quota","u","t","new");
+        assertThat(service.task(old)).containsEntry("status","CANCELLED");
+        service.claim(blocked);
+        service.cancel(latest);
+        assertThat(service.claim(QuotaAdmission.allow())).isEmpty();
+        String fresh=submit("unknown-quota","u","t","fresh");
+        assertThat(service.claim(QuotaAdmission.unknown())).containsEntry("taskId",fresh);
+        assertThat(service.claim(blocked)).isEmpty();
+        assertThat(service.task(fresh)).containsEntry("status","RUNNING");
+    }
+
+    @Test void workerClaimEndpointAppliesQuotaBeforeExecution() throws Exception {
+        String id=submit("quota-endpoint","u","t","hello");
+        org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","AVAILABLE","windows",List.of(
+            Map.of("model","general","kind","interval","remainingPercent",0,"resetsAt",System.currentTimeMillis()+3600000))));
+        mvc.perform(post("/internal/worker/claim").header("Authorization",WORKER))
+            .andExpect(status().isOk()).andExpect(content().json("{}"));
+        assertThat(service.task(id)).containsEntry("status","WAITING_QUOTA");
+        org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","AVAILABLE","windows",List.of(
+            Map.of("model","general","kind","interval","remainingPercent",100))));
+        mvc.perform(post("/internal/worker/claim").header("Authorization",WORKER))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.taskId").value(id));
     }
 }

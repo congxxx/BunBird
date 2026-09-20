@@ -82,9 +82,9 @@ public class TaskService {
         }
         // The topic lock makes replacement atomic with receive/claim. Retain the old
         // lease until the worker acknowledges process cleanup (or its lease expires).
-        for (var old : db.queryForList("SELECT id,message_id FROM task WHERE tenant_id=? AND topic_id=? AND sender_id=? AND status IN ('QUEUED','RUNNING')", tenant, topicId, in.senderId())) {
+        for (var old : db.queryForList("SELECT id,message_id FROM task WHERE tenant_id=? AND topic_id=? AND sender_id=? AND status IN ('QUEUED','RUNNING','WAITING_QUOTA')", tenant, topicId, in.senderId())) {
             String oldId = (String) old.get("id");
-            if (db.update("UPDATE task SET status='CANCELLED',error_code='SUPERSEDED',updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING')", now(), oldId) == 0) continue;
+            if (db.update("UPDATE task SET status='CANCELLED',pause_reason=NULL,resume_at=NULL,error_code='SUPERSEDED',updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING','WAITING_QUOTA')", now(), oldId) == 0) continue;
             event(oldId, "SUPERSEDED", "已被同一会话的新消息中断");
             // Drop unsent stale progress, but let an in-flight delivery finish before closing its card.
             db.update("UPDATE delivery SET status='FAILED',error_code='TASK_SUPERSEDED' WHERE task_id=? AND status='PENDING'", oldId);
@@ -92,7 +92,7 @@ public class TaskService {
             db.update("UPDATE delivery SET task_state='SUPERSEDED' WHERE task_id=? AND status='PENDING'", oldId);
         }
         // Bound the queue for the small, single-tenant pilot.
-        Integer waiting = db.queryForObject("SELECT COUNT(*) FROM task WHERE tenant_id=? AND status IN ('QUEUED','RUNNING')", Integer.class, tenant);
+        Integer waiting = db.queryForObject("SELECT COUNT(*) FROM task WHERE tenant_id=? AND status IN ('QUEUED','RUNNING','WAITING_QUOTA')", Integer.class, tenant);
         if (waiting != null && waiting >= 100) {
             enqueue(null, in.messageId(), "当前排队任务较多，请稍后重试。");
             return Map.of("accepted", true, "busy", true);
@@ -108,10 +108,10 @@ public class TaskService {
     }
 
     public List<Map<String, Object>> tasks() {
-        return db.queryForList("SELECT id,topic_id,sender_id,status,model,error_code,created_at,updated_at FROM task WHERE tenant_id=? ORDER BY position DESC LIMIT 100", tenant);
+        return db.queryForList("SELECT id,topic_id,sender_id,status,model,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? ORDER BY position DESC LIMIT 100", tenant);
     }
     public Map<String, Object> task(String taskId) {
-        var rows = db.queryForList("SELECT id,tenant_id,topic_id,sender_id,message_id,prompt,status,result,error_code,model,usage_json,created_at,updated_at FROM task WHERE id=? AND tenant_id=?", taskId, tenant);
+        var rows = db.queryForList("SELECT id,tenant_id,topic_id,sender_id,message_id,prompt,status,result,error_code,model,usage_json,pause_reason,resume_at,created_at,updated_at FROM task WHERE id=? AND tenant_id=?", taskId, tenant);
         if (rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND);
         return rows.getFirst();
     }
@@ -127,7 +127,7 @@ public class TaskService {
     @Transactional
     public Map<String, Object> cancel(String taskId) {
         var row = task(taskId);
-        int changed = db.update("UPDATE task SET status='CANCELLED',lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING')", now(), taskId);
+        int changed = db.update("UPDATE task SET status='CANCELLED',pause_reason=NULL,resume_at=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING','WAITING_QUOTA')", now(), taskId);
         if (changed == 1) {
             event(taskId, "CANCELLED", "用户取消");
             enqueue(taskId, (String)row.get("message_id"), "任务 " + taskId + " 已取消。");
@@ -135,16 +135,45 @@ public class TaskService {
         return task(taskId);
     }
 
+    public boolean hasWaitingTasks() {
+        return db.queryForObject("SELECT COUNT(*) FROM task WHERE tenant_id=? AND status IN ('QUEUED','WAITING_QUOTA')",Integer.class,tenant)>0;
+    }
+
     @Transactional
-    public Map<String, Object> claim() {
-        var candidates = db.queryForList("SELECT id,topic_id FROM task WHERE status='QUEUED' AND tenant_id=? ORDER BY position LIMIT 100", tenant);
+    public Map<String,Object> claim() { return claim(QuotaAdmission.allow()); }
+
+    @Transactional
+    public Map<String, Object> claim(QuotaAdmission admission) {
+        var candidates = db.queryForList("SELECT id,topic_id FROM task WHERE status IN ('QUEUED','WAITING_QUOTA') AND tenant_id=? ORDER BY position LIMIT 100", tenant);
         for (var candidate : candidates) {
             String topicId = (String)candidate.get("topic_id"), taskId = (String)candidate.get("id");
             db.queryForList("SELECT id FROM topic WHERE id=? FOR UPDATE", topicId);
             if (db.queryForObject("SELECT COUNT(*) FROM task WHERE topic_id=? AND (status='RUNNING' OR (status='CANCELLED' AND lease_until>?))", Integer.class, topicId, now()) > 0) continue;
+            var current=task(taskId);
+            if (!Set.of("QUEUED","WAITING_QUOTA").contains(current.get("status"))) continue;
+            if ("BLOCK".equals(admission.state()) || ("UNKNOWN".equals(admission.state()) && "WAITING_QUOTA".equals(current.get("status")))) {
+                boolean first=!"WAITING_QUOTA".equals(current.get("status"));
+                if(!first && Objects.equals(admission.reason(),current.get("pause_reason"))
+                        && Objects.equals(admission.resumeAt(),current.get("resume_at"))) continue;
+                if(db.update("UPDATE task SET status='WAITING_QUOTA',pause_reason=?,resume_at=?,updated_at=? WHERE id=? AND status IN ('QUEUED','WAITING_QUOTA')",
+                    admission.reason(),admission.resumeAt(),now(),taskId)==0) continue;
+                if(first) {
+                    String reason="QUOTA_WEEKLY_EXHAUSTED".equals(admission.reason())?"周额度已耗尽":"短周期额度已耗尽";
+                    String when=admission.resumeAt()==null?"恢复时间暂未确认，将定期检查。":
+                        "预计在北京时间 "+java.time.Instant.ofEpochMilli(admission.resumeAt()).atZone(java.time.ZoneId.of("Asia/Shanghai"))
+                            .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))+" 重置，确认额度恢复后继续。";
+                    event(taskId,"WAITING_QUOTA",reason);
+                    enqueue(taskId,(String)current.get("message_id"),reason+"，任务尚未开始，已保留会话与工作区。"+when+"等待期间发送新消息会替换当前任务。");
+                }
+                continue;
+            }
             String token = id();
-            if (db.update("UPDATE task SET status='RUNNING',lease_token=?,lease_until=?,deadline=?,updated_at=? WHERE id=? AND status='QUEUED'",
+            if (db.update("UPDATE task SET status='RUNNING',pause_reason=NULL,resume_at=NULL,lease_token=?,lease_until=?,deadline=?,updated_at=? WHERE id=? AND status IN ('QUEUED','WAITING_QUOTA')",
                     token, now()+LEASE_MS, now()+DEADLINE_MS, now(), taskId) == 0) continue;
+            if("WAITING_QUOTA".equals(current.get("status"))) {
+                event(taskId,"QUOTA_RESUMED","已确认额度可用，开始执行");
+                db.update("UPDATE delivery SET status='FAILED',error_code='QUOTA_ALREADY_RESUMED' WHERE task_id=? AND task_state='WAITING_QUOTA' AND status='PENDING'",taskId);
+            }
             event(taskId, "RUNNING", "Worker 已领取");
             var task = task(taskId);
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);

@@ -16,6 +16,7 @@ from lark_oapi.api.im.v1 import (
 log = logging.getLogger(__name__)
 STATES = {
     "QUEUED": "THINKING",
+    "WAITING_QUOTA": "CLEAR",
     "RUNNING": "THINKING",
     "STARTED": "THINKING",
     "WORKSPACE": "Typing",

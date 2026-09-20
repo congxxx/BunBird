@@ -10,7 +10,11 @@ import static io.bunbird.Protocol.*;
 @RestController
 public class Api {
     private final TaskService tasks;
-    public Api(TaskService tasks) { this.tasks = tasks; }
+    private final QuotaService quota;
+    private final String model;
+    public Api(TaskService tasks, QuotaService quota, @org.springframework.beans.factory.annotation.Value("${MODEL_NAME:}") String model) {
+        this.tasks = tasks; this.quota=quota; this.model=model;
+    }
     @GetMapping("/health") public Map<String, String> health() { return Map.of("status", "ok", "service", "bunbird-control"); }
     @PostMapping("/internal/bridge/events") public Map<String, Object> receive(@Valid @RequestBody Incoming incoming) {
         try { return tasks.receive(incoming); }
@@ -21,7 +25,11 @@ public class Api {
     @GetMapping("/api/tasks/{id}/events") public Object events(@PathVariable String id, @RequestParam(defaultValue="0") long after) { return tasks.events(id, after); }
     @GetMapping("/api/tasks/{id}/deliveries") public Object deliveries(@PathVariable String id) { return tasks.deliveries(id); }
     @PostMapping("/api/tasks/{id}/cancel") public Object cancel(@PathVariable String id) { return tasks.cancel(id); }
-    @PostMapping("/internal/worker/claim") public Object claim() { return tasks.claim(); }
+    @PostMapping("/internal/worker/claim") public Object claim() {
+        // Do network I/O before entering the claim transaction or taking any topic lock.
+        if(!tasks.hasWaitingTasks()) return Map.of();
+        return tasks.claim(QuotaAdmission.from(quota.get(),model,System.currentTimeMillis()));
+    }
     @PostMapping("/internal/worker/tasks/{id}/heartbeat") public Object heartbeat(@PathVariable String id, @Valid @RequestBody Lease body) { return tasks.heartbeat(id, body.leaseToken()); }
     @PostMapping("/internal/worker/tasks/{id}/stopped") public Object stopped(@PathVariable String id, @Valid @RequestBody Lease body) { return tasks.stopped(id, body.leaseToken()); }
     @PostMapping("/internal/worker/tasks/{id}/complete") public Object complete(@PathVariable String id, @Valid @RequestBody Completion body) { return tasks.complete(id, body); }

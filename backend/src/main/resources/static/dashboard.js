@@ -1,7 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const fmt = n => new Intl.NumberFormat("zh-CN").format(n);
-const stateNames = {QUEUED:"排队中",RUNNING:"执行中",SUCCEEDED:"已完成",FAILED:"失败",CANCELLED:"已中断"};
+const stateNames = {QUEUED:"排队中",RUNNING:"执行中",SUCCEEDED:"已完成",FAILED:"失败",CANCELLED:"已中断",WAITING_QUOTA:"等待额度"};
 let credential = "", pending = false, generation = 0, quotaPending = false;
 function text(id, value) { $(id).textContent = value; }
 function node(tag, value, className) { const el=document.createElement(tag); if(value!=null)el.textContent=value; if(className)el.className=className; return el; }
@@ -9,7 +9,7 @@ function render(data) {
   text("total",fmt(data.usage.total)); text("io",`${fmt(data.usage.input)} / ${fmt(data.usage.output)}`);
   text("cache",`${fmt(data.usage.cacheRead)} / ${fmt(data.usage.cacheWrite)}`);
   text("count",fmt(data.tasks));text("coverage",`${data.reportedTasks} / ${data.tasks} 个任务返回了用量`);
-  text("running",`执行中 ${data.statuses.RUNNING||0} · 完成 ${data.statuses.SUCCEEDED||0} · 中断 ${data.statuses.CANCELLED||0}`);
+  text("running",`执行中 ${data.statuses.RUNNING||0} · 完成 ${data.statuses.SUCCEEDED||0} · 等待额度 ${data.statuses.WAITING_QUOTA||0} · 中断 ${data.statuses.CANCELLED||0}`);
   $("bars").replaceChildren(); const max=Math.max(1,...data.daily.map(d=>d.usage.total));
   data.daily.forEach(d=>{const bar=node("div",null,"bar");bar.style.height=`${Math.max(d.usage.total?2:0,100*d.usage.total/max)}%`;bar.title=`${d.date}：${fmt(d.usage.total)} Token`;$("bars").append(bar);});
   text("start",data.daily[0]?.date||"");text("end",data.daily.at(-1)?.date||"");
@@ -17,7 +17,11 @@ function render(data) {
   $("models").replaceChildren();data.models.forEach(m=>{const row=node("div",null,"model-row");row.append(node("span",m.model),node("b",fmt(m.usage.total)));$("models").append(row);});
   if(!data.models.length)$("models").append(node("p","暂无已上报的用量","muted"));
   $("account-list").replaceChildren();data.accounts.forEach(a=>{const item=node("article",null,"panel account");const main=node("div");main.append(node("h2",a.name),node("p",`${a.executor} · ${a.model}`));const meta=node("div",null,"account-meta");meta.append(node("span","环境配置","pill"),node("div","套餐额度见下方 · 自动切换：未启用"));item.append(main,meta);$("account-list").append(item);});
-  $("task-list").replaceChildren();data.recent.forEach(t=>{const row=node("tr");row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})));const id=node("td",t.id.slice(0,8));id.title=t.id;row.append(id,node("td",t.model||"—"));const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));row.append(status,node("td",t.usage?fmt(t.usage.total):"未上报"));$("task-list").append(row);});
+  $("task-list").replaceChildren();data.recent.forEach(t=>{const row=node("tr");row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})));const id=node("td",t.id.slice(0,8));id.title=t.id;row.append(id,node("td",t.model||"—"));const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));if(t.status==="WAITING_QUOTA") {
+    const reasons={QUOTA_WEEKLY_EXHAUSTED:"周额度已耗尽",QUOTA_INTERVAL_EXHAUSTED:"短周期额度已耗尽",QUOTA_UNCONFIRMED:"暂时无法确认额度，保留等待"};
+    status.append(node("div",reasons[t.pause_reason]||"等待额度检查","note"));
+    status.append(node("div",t.resume_at?`预计 ${new Date(t.resume_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})} 恢复（北京时间）`:"恢复时间待确认","note"));
+  }row.append(status,node("td",t.usage?fmt(t.usage.total):"未上报"));$("task-list").append(row);});
   if(!data.recent.length){const row=node("tr"),cell=node("td","这段时间还没有任务");cell.colSpan=5;row.append(cell);$("task-list").append(row);}
   text("updated",`更新于 ${new Date(data.generatedAt).toLocaleTimeString("zh-CN")} · 每 15 秒自动刷新`);
 }
@@ -47,6 +51,7 @@ function renderQuota(data) {
     progress.setAttribute("aria-label",`${w.model} 剩余额度 ${w.remainingPercent}%`);card.append(progress);
     if(w.resetsAt)card.append(node("p",`重置：${new Date(w.resetsAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})}（北京时间）`,"note"));
     if(w.resetsAt&&w.startsAt&&w.resetsAt>w.startsAt)card.append(node("small",`实际窗口 ${Math.round((w.resetsAt-w.startsAt)/3600000*10)/10} 小时`,"muted"));
+    if(data.status==="AVAILABLE"&&w.model==="general"&&w.remainingPercent<=10)card.append(node("p",w.remainingPercent===0?"额度已耗尽，新任务将等待恢复。":"额度偏低，建议留意后续任务。","quota-warning"));
     grid.append(card);
   });panel.append(grid);
 }

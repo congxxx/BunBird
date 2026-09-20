@@ -182,3 +182,17 @@ def test_bridge_types_before_answer_and_completes_only_after_delivery(tmp_path, 
     bridge.http.close()
     bridge.inbox.close()
     queue.close()
+
+
+def test_quota_wait_clears_thinking_and_resume_restores_it(tmp_path):
+    queue, api, _ = setup(tmp_path)
+    queue.enqueue(delivery("accepted", "QUEUED"))
+    queue.pump_once()
+    assert emojis(api) == ["THINKING"]
+    queue.enqueue(delivery("waiting", "WAITING_QUOTA"))
+    queue.pump_once()
+    assert emojis(api) == []
+    queue.enqueue(delivery("resumed", "UPDATE_0"))
+    queue.pump_once()
+    assert emojis(api) == ["THINKING"]
+    queue.close()

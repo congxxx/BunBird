@@ -34,3 +34,5 @@ Worker claim 无任务时返回 `{}`，有任务时返回 `taskId, leaseToken, p
 发送项还包含 `taskState`，在事务创建时固定，不随任务后续变化覆盖。同一任务的发送项按顺序处理；受理回复送达后安排 THINKING，成功答案发送前安排 Typing，成功送达后安排 DONE。失败/取消安排清理状态。连接器将表情更新单独持久化，新阶段替代尚未成功的旧阶段，查询并确认自己的 reaction 后再添加或移除。V3 之前的历史发送项保持空阶段，不会因升级自动批量补发状态表情。
 
 同一用户在同一 Topic 的新任务消息会将旧 QUEUED/RUNNING 任务置为 CANCELLED，错误码 SUPERSEDED。已排队的旧进展丢弃，SUPERSEDED 发送项只关闭旧进展卡片并清除表情，不额外回复取消通知。运行中旧任务保留租约，Worker 终止子进程后提交 stopped（请求体同 heartbeat），新任务才能领取；Worker 失联则等待旧租约到期。重复来源消息和查询命令不触发替换，其他用户或 Topic 不受影响。
+
+V4 增加任务 `pause_reason` 和 `resume_at`（毫秒）。`WAITING_QUOTA` 仅用于尚未开始的任务；Worker claim 在数据库事务外先取得额度决策，在话题锁内暂停或领取。恢复前产生 `QUOTA_RESUMED` 事件并清空暂停字段，仍使用原任务 ID 与会话身份，不重放已执行任务。
