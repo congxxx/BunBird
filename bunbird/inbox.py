@@ -37,5 +37,12 @@ class Inbox:
         with self.lock, self.db:
             self.db.execute("DELETE FROM inbox WHERE id=?", (key,))
 
+    def replace(self, key: str, event: dict):
+        with self.lock, self.db:
+            self.db.execute(
+                "UPDATE inbox SET payload=? WHERE id=?",
+                (json.dumps(event, ensure_ascii=False), key),
+            )
+
     def close(self):
         self.db.close()

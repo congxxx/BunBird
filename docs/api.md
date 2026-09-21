@@ -38,3 +38,5 @@ Worker claim 无任务时返回 `{}`，有任务时返回 `taskId, leaseToken, p
 V4 增加任务 `pause_reason` 和 `resume_at`（毫秒）。`WAITING_QUOTA` 仅用于尚未开始的任务；Worker claim 在数据库事务外先取得额度决策，在话题锁内暂停或领取。恢复前产生 `QUOTA_RESUMED` 事件并清空暂停字段，仍使用原任务 ID 与会话身份，不重放已执行任务。
 
 V5 增加调度锁表。全租户最多 3 个 RUNNING 或仍持有有效租约的 CANCELLED 任务；接收和领取采用相同的调度锁→话题锁顺序。`CAPACITY_QUEUE` 事件和发送阶段表示一次并发排队提示，任务本身仍为 QUEUED；领取后跳过尚未发送的排队提示。
+
+V6 增加附件表。Incoming 可选 `attachment: {id,name,size,sha256}`，仅供可信 Bridge 在下载完成后提交；文件事件只写入暂存元数据和确认通知，不创建任务。普通任务 claim 返回 `attachments` 清单，实际文件从 Bridge/Worker 共享的 ATTACHMENT_ROOT 读取并校验大小和 SHA-256。文件名不用于决定存储路径。

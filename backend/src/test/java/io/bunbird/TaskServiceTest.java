@@ -33,7 +33,7 @@ class TaskServiceTest {
 
     @BeforeEach void clear() {
         org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","UNSUPPORTED"));
-        for (String table : List.of("delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
+        for (String table : List.of("attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
     }
     Incoming message(String event, String user, String topic, String text) {
         return new Incoming("tenant-test","cli-test",event,"om-"+event,"chat-test",user,topic,text,"group");
@@ -383,5 +383,55 @@ class TaskServiceTest {
         service.stopped(oldId,(String)old.get("leaseToken"));
         assertThat(service.claim()).isNotEmpty();
         assertThat(service.claim()).isEmpty();
+    }
+
+    Incoming fileMessage(String event,String user,String topic) {
+        return new Incoming("tenant-test","cli-test",event,"om-"+event,"chat-test",user,topic,"/attachment","group",
+            new Attachment(UUID.randomUUID().toString(),"example.txt",3,"a".repeat(64)));
+    }
+
+    @Test void fileDoesNotInterruptAndNextTextAtomicallyConsumesPendingAttachments() throws Exception {
+        String active=submit("active","u","thread","existing task");
+        service.claim();
+        var file=fileMessage("file","u","thread");
+        service.receive(file);
+        assertThat(service.task(active)).containsEntry("status","RUNNING");
+        assertThat(service.tasks()).hasSize(1);
+        mvc.perform(post("/internal/bridge/events").header("Authorization",BRIDGE)
+            .contentType("application/json").content(json.writeValueAsBytes(file))).andExpect(status().isOk())
+            .andExpect(jsonPath("$.duplicate").value(true));
+        service.receive(message("help-file","u","thread","/help"));
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM attachment WHERE task_id IS NULL",Integer.class)).isEqualTo(1);
+        String next=submit("file-text","u","thread","read this file");
+        assertThat(service.task(active)).containsEntry("status","CANCELLED");
+        assertThat(db.queryForObject("SELECT task_id FROM attachment",String.class)).isEqualTo(next);
+        // Simulate expired cleanup lease, then verify worker receives a structured manifest.
+        db.update("UPDATE task SET lease_until=0 WHERE id=?",active);
+        var job=service.claim();
+        assertThat(job).containsEntry("taskId",next);
+        assertThat((List<?>)job.get("attachments")).hasSize(1);
+        assertThat(job.get("attachments").toString()).contains("example.txt");
+        service.complete(next,success(job));
+        submit("after-file","u","thread","next turn");
+        assertThat((List<?>)service.claim().get("attachments")).isEmpty();
+    }
+
+    @Test void groupRootFilesFollowOwnNextRootOrFileThreadAndNeverAnotherSenderOrThread() {
+        service.receive(fileMessage("root-file","owner","om-root-file"));
+        String other=submit("other-user","other","om-other-user","hello");
+        String thread=submit("other-thread","owner","separate-thread","hello");
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM attachment WHERE task_id IN (?,?)",Integer.class,other,thread)).isZero();
+        String own=submit("file-reply","owner","om-root-file","read attached file");
+        assertThat(db.queryForObject("SELECT task_id FROM attachment",String.class)).isEqualTo(own);
+        service.receive(fileMessage("root-file2","owner","om-root-file2"));
+        String rootText=submit("root-text","owner","om-root-text","read next file");
+        assertThat(db.queryForObject("SELECT task_id FROM attachment WHERE message_id='om-root-file2'",String.class)).isEqualTo(rootText);
+    }
+
+    @Test void attachmentBatchLimitDoesNotCreateTasks() {
+        for(int i=0;i<11;i++) service.receive(fileMessage("limit"+i,"u","thread"));
+        assertThat(service.tasks()).isEmpty();
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM attachment",Integer.class)).isEqualTo(10);
+        assertThat(db.queryForObject("SELECT content FROM delivery ORDER BY position DESC LIMIT 1",String.class)).contains("10 个");
     }
 }

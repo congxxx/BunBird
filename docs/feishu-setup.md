@@ -47,3 +47,5 @@
 ## 官方参考
 
 实现核对了 [Python SDK 官方仓库](https://github.com/larksuite/oapi-sdk-python)及安装的 1.7.3 源码中的 WebSocket、事件分发、回复请求模型；事件与权限配置参见 [接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)，订阅方式参见 [配置事件订阅方式](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)，回复参见 [回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)。官网部分页面为动态加载，真实应用权限仍需在后台按当前接口要求确认。
+
+附件通过官方[获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message/get-2)接口下载。机器人须在消息所属会话中，并具有对应消息及资源读取权限；如提示下载失败，请在开放平台核对该接口要求的权限并发布应用版本。单独上传附件不触发 Agent，后续文字才提交任务。

@@ -263,3 +263,58 @@ def test_oversized_text_becomes_explanation_command(config, payload):
     payload["event"]["message"]["content"] = json.dumps({"text": "字" * 12001})
     assert normalize(payload, config, "ou-bot")["text"] == "/too-long"
     assert normalize(original, config, "ou-bot")["text"] == "你好"
+
+
+def test_file_normalization_keeps_resource_metadata(config, payload):
+    message = payload["event"]["message"]
+    message.update(
+        message_type="file",
+        content=json.dumps({"file_key": "file_v2_test", "file_name": "example.txt"}),
+    )
+    event = normalize(payload, config, "ou-bot")
+    assert event["text"] == "/attachment"
+    assert event["resource"] == {"key": "file_v2_test", "name": "example.txt"}
+    assert event["topicKey"] == "dm:ou-user"
+
+
+def test_attachment_download_is_durable_before_backend_retry(
+    config, payload, monkeypatch, tmp_path
+):
+    import io
+
+    monkeypatch.setenv("ATTACHMENT_ROOT", str(tmp_path / "files"))
+    message = payload["event"]["message"]
+    message.update(
+        message_type="file",
+        content=json.dumps({"file_key": "file_v2_test", "file_name": "example.txt"}),
+    )
+    downloads, posted = [], []
+
+    def get(request):
+        downloads.append(request)
+        return SimpleNamespace(success=lambda: True, file=io.BytesIO(b"document"))
+
+    def handler(request):
+        if request.url.path.endswith("/events"):
+            posted.append(json.loads(request.content))
+            return httpx.Response(503 if len(posted) == 1 else 200, json={"accepted": True})
+        return httpx.Response(200, json={})
+
+    bridge = Bridge.__new__(Bridge)
+    bridge.sdk = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message_resource=SimpleNamespace(get=get)))
+    )
+    bridge.inbox = Inbox(config.spool_path)
+    bridge.inbox.put(normalize(payload, config, "ou-bot"))
+    bridge.http = httpx.Client(base_url="http://control", transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.HTTPStatusError):
+        bridge.pump_once()
+    bridge.inbox.close()
+    bridge.inbox = Inbox(config.spool_path)
+    bridge.pump_once()
+    assert len(downloads) == 1
+    assert posted[0] == posted[1] and "resource" not in posted[0]
+    assert posted[0]["attachment"]["size"] == 8
+    assert bridge.inbox.peek() is None
+    bridge.http.close()
+    bridge.inbox.close()

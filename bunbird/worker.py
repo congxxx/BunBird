@@ -52,6 +52,8 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
 
         if hasattr(model, "answer_with_progress"):
             return await model.answer_with_progress(job, progress)
+        if job.get("attachments"):
+            raise ModelError("ATTACHMENTS_REQUIRE_AGENT")
         target = target_from_prompt(job["prompt"])
         name = "Git 工作空间准备" if target is not None else model.config.name
         await progress("STARTED", f"Session：{task_id}\n执行方式：{name}")

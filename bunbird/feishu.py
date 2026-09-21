@@ -8,6 +8,7 @@ import httpx
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
 
+from bunbird.attachments import download
 from bunbird.config import ControlConfig, FeishuConfig
 from bunbird.control import client
 from bunbird.inbox import Inbox
@@ -54,7 +55,22 @@ def normalize(payload: dict, config: FeishuConfig, bot_open_id: str) -> dict | N
     bot_mentions = [m for m in mentions if m.get("id", {}).get("open_id") == bot_open_id]
     if not all([header.get("event_id"), message.get("message_id"), chat_id, sender_id]):
         return None
-    if message.get("message_type") != "text":
+    resource = None
+    if message.get("message_type") == "file":
+        text = "/unsupported"
+        try:
+            content = json.loads(message.get("content", "{}"))
+            key, name = content.get("file_key"), content.get("file_name")
+            if (
+                isinstance(key, str)
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,256}", key)
+                and isinstance(name, str)
+            ):
+                resource = {"key": key, "name": name[:160] or "attachment.bin"}
+                text = "/attachment"
+        except (ValueError, AttributeError):
+            pass
+    elif message.get("message_type") != "text":
         text = "/unsupported"
     else:
         try:
@@ -88,6 +104,7 @@ def normalize(payload: dict, config: FeishuConfig, bot_open_id: str) -> dict | N
         "senderId": sender_id,
         "topicKey": topic_key,
         "text": text,
+        **({"resource": resource} if resource else {}),
     }
 
 
@@ -167,6 +184,19 @@ class Bridge:
             key, event = item
             # Older on-disk events predate the explicit chat type field.
             event.setdefault("chatType", "p2p" if event["topicKey"].startswith("dm:") else "group")
+            if "resource" in event:
+                for attempt in range(3):
+                    try:
+                        event["attachment"] = download(self.sdk, event)
+                        break
+                    except Exception as error:
+                        if str(error) == "ATTACHMENT_TOO_LARGE":
+                            event["text"] = "/attachment-too-large"
+                            break
+                        if attempt == 2:
+                            event["text"] = "/attachment-download-failed"
+                event.pop("resource")
+                self.inbox.replace(key, event)
             response = self.http.post("/internal/bridge/events", json=event)
             response.raise_for_status()
             self.inbox.remove(key)

@@ -46,9 +46,11 @@ services:
       MODEL_NAME: ${MODEL_NAME:-}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       WORKSPACE_ROOT: /app/data/workspaces
+      ATTACHMENT_ROOT: /app/attachments
       WORKSPACE_GIT_HOSTS: ${WORKSPACE_GIT_HOSTS:-github.com,gitee.com,gitcode.com}
     volumes:
       - worker-data:/app/data
+      - attachment-data:/app/attachments:ro
     depends_on:
       - control
     restart: unless-stopped
@@ -65,8 +67,10 @@ services:
       FEISHU_DOMAIN: ${FEISHU_DOMAIN:-https://open.feishu.cn}
       FEISHU_ALLOWED_CHAT_IDS: ${FEISHU_ALLOWED_CHAT_IDS:-}
       FEISHU_SPOOL_PATH: /app/data/feishu-inbox.db
+      ATTACHMENT_ROOT: /app/attachments
     volumes:
       - bridge-data:/app/data
+      - attachment-data:/app/attachments
     depends_on:
       - control
     restart: unless-stopped
@@ -75,3 +79,4 @@ volumes:
   postgres-data:
   bridge-data:
   worker-data:
+  attachment-data:

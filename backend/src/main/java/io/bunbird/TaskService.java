@@ -72,14 +72,31 @@ public class TaskService {
         if (topics.isEmpty()) db.update("INSERT INTO topic(id,tenant_id,app_id,chat_id,external_key) VALUES(?,?,?,?,?)",
                 topicId, tenant, appId, in.chatId(), in.topicKey());
         db.queryForList("SELECT id FROM topic WHERE id=? FOR UPDATE", topicId);
+        String attachmentScope=in.chatType().equals("group") && in.topicKey().equals(in.messageId())?"chat":in.topicKey();
+        if(in.attachment()==null && db.queryForObject("SELECT COUNT(*) FROM attachment WHERE tenant_id=? AND app_id=? AND chat_id=? AND sender_id=? AND message_id=? AND scope_key='chat' AND task_id IS NULL",Integer.class,tenant,appId,in.chatId(),in.senderId(),in.topicKey())>0) attachmentScope="chat";
+        if(in.attachment()!=null) {
+            var file=in.attachment();
+            int count=db.queryForObject("SELECT COUNT(*) FROM attachment WHERE tenant_id=? AND app_id=? AND chat_id=? AND sender_id=? AND scope_key=? AND task_id IS NULL",Integer.class,tenant,appId,in.chatId(),in.senderId(),attachmentScope);
+            if(count>=10) enqueue(null,in.messageId(),"待处理附件已达 10 个，请先发送文字处理已有文件，再上传新文件。");
+            else {
+                db.update("INSERT INTO attachment(id,tenant_id,app_id,chat_id,sender_id,scope_key,message_id,file_name,file_size,sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    file.id(),tenant,appId,in.chatId(),in.senderId(),attachmentScope,in.messageId(),file.name(),file.size(),file.sha256(),now());
+                enqueue(null,in.messageId(),"📎 已收到文件「"+file.name()+"」（共 "+(count+1)+" 个待处理）。发送文字说明后将一并交给 AI。");
+            }
+            return Map.of("accepted",true,"attachment",true);
+        }
         String text = in.text().strip();
         String[] words = text.split("\\s+", 2);
         String command = words[0].toLowerCase(Locale.ROOT);
         if (command.startsWith("/") && !command.equals("/workspace")) {
-            if (command.equals("/help")) {
-                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n启用 Claude Code 时可直接发送拉取项目、修改代码等任务要求；在原话题继续回复即可续接会话。");
+            if (command.equals("/attachment-too-large")) {
+                enqueue(null,in.messageId(),"附件超过 10 MB，未保存。请缩小文件后重新发送。");
+            } else if (command.equals("/attachment-download-failed")) {
+                enqueue(null,in.messageId(),"附件下载失败，未保存。请确认应用具有消息资源下载权限后重新发送文件。");
+            } else if (command.equals("/help")) {
+                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n启用 Claude Code 时可直接发送拉取项目、修改代码等任务要求；在原话题继续回复即可续接会话。上传文件后发送文字说明，可将附件一并交给 Agent。");
             } else if (command.equals("/unsupported")) {
-                enqueue(null, in.messageId(), "当前最小版仅支持文字消息，请将问题以文字发送。");
+                enqueue(null, in.messageId(), "当前支持文字和文件消息。上传文件后，请发送文字说明处理要求。");
             } else if (command.equals("/too-long")) {
                 enqueue(null, in.messageId(), "消息超过 12000 字符，请缩短后发送。");
             } else if (command.equals("/status") || command.equals("/cancel")) {
@@ -118,6 +135,8 @@ public class TaskService {
         db.update("INSERT INTO task(id,tenant_id,topic_id,sender_id,message_id,prompt,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'QUEUED',?,?)",
                 taskId, tenant, topicId, in.senderId(), in.messageId(), text, now(), now());
         db.update("UPDATE ingress SET task_id=? WHERE id=?", taskId, ingressId);
+        db.update("UPDATE attachment SET task_id=? WHERE tenant_id=? AND app_id=? AND chat_id=? AND sender_id=? AND scope_key=? AND task_id IS NULL",
+            taskId,tenant,appId,in.chatId(),in.senderId(),attachmentScope);
         event(taskId, "QUEUED", "已受理，等待执行");
         // A durable reaction-only delivery: no acknowledgement text is sent to the chat.
         enqueue(taskId, in.messageId(), "");
@@ -204,7 +223,8 @@ public class TaskService {
             var task = task(taskId);
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);
             Collections.reverse(history);
-            return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant, "topicId", topicId, "senderId", task.get("sender_id"));
+            return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant, "topicId", topicId, "senderId", task.get("sender_id"), "attachments",
+                db.queryForList("SELECT id,file_name AS name,file_size AS size,sha256 FROM attachment WHERE task_id=? AND tenant_id=? ORDER BY created_at,id",taskId,tenant));
         }
         return Map.of();
     }
