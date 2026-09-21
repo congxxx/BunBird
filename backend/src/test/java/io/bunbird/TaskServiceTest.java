@@ -346,4 +346,42 @@ class TaskServiceTest {
         mvc.perform(post("/internal/worker/claim").header("Authorization",WORKER))
             .andExpect(status().isOk()).andExpect(jsonPath("$.taskId").value(id));
     }
+
+    @Test void threeConcurrentSessionsQueueTheFourthOnceAndStartItWhenSlotFrees() {
+        var ids=new ArrayList<String>();
+        for(int i=0;i<4;i++) ids.add(submit("capacity"+i,"u","topic"+i,"hello"));
+        var jobs=List.of(service.claim(),service.claim(),service.claim());
+        assertThat(jobs).allMatch(j->!j.isEmpty());
+        assertThat(service.claim()).isEmpty();assertThat(service.claim()).isEmpty();
+        String waiting=ids.get(3);
+        assertThat(service.task(waiting)).containsEntry("status","QUEUED");
+        assertThat(service.events(waiting,0)).extracting(e->e.get("type")).containsExactly("QUEUED","CAPACITY_QUEUE");
+        assertThat(db.queryForObject("SELECT content FROM delivery WHERE task_id=? AND task_state='CAPACITY_QUEUE'",String.class,waiting))
+            .isEqualTo("⏳ 会话排队中…（最多 3 个并发）");
+        service.complete(ids.getFirst(),success(jobs.getFirst()));
+        assertThat(service.claim()).containsEntry("taskId",waiting);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM delivery WHERE task_id=? AND task_state='CAPACITY_QUEUE' AND status='PENDING'",Integer.class,waiting)).isZero();
+    }
+
+    @Test void simultaneousWorkersRespectGlobalCapAndCleanupRetainsSlot() throws Exception {
+        for(int i=0;i<6;i++) submit("parallel"+i,"u","topic"+i,"hello");
+        var jobs=new ArrayList<Map<String,Object>>();
+        try(var pool=Executors.newFixedThreadPool(6)) {
+            var start=new CountDownLatch(1);
+            var futures=new ArrayList<Future<Map<String,Object>>>();
+            for(int i=0;i<6;i++) futures.add(pool.submit(()->{start.await();return service.claim();}));
+            start.countDown();
+            for(var future:futures) { var job=future.get(10,TimeUnit.SECONDS);if(!job.isEmpty()) jobs.add(job); }
+        }
+        assertThat(jobs).hasSize(3);
+        var old=jobs.getFirst();
+        String oldId=(String)old.get("taskId");
+        // Replacing a running message retains its occupied slot until process cleanup.
+        String topic=(String)db.queryForObject("SELECT external_key FROM topic WHERE id=?",String.class,old.get("topicId"));
+        submit("replacement","u",topic,"new");
+        assertThat(service.claim()).isEmpty();
+        service.stopped(oldId,(String)old.get("leaseToken"));
+        assertThat(service.claim()).isNotEmpty();
+        assertThat(service.claim()).isEmpty();
+    }
 }

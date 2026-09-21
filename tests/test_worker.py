@@ -208,3 +208,90 @@ def test_cancel_or_control_loss_aborts_model_without_completion(control_status):
     asyncio.run(scenario())
     assert cancelled == [True]
     assert paths == ["/internal/worker/tasks/task/heartbeat", "/internal/worker/tasks/task/stopped"]
+
+
+def test_worker_runs_three_sessions_and_drains_queue_without_exceeding_cap(monkeypatch):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from bunbird.config import ControlConfig
+    from bunbird.worker import run
+
+    async def scenario():
+        started = [asyncio.Event() for _ in range(4)]
+        release = [asyncio.Event() for _ in range(4)]
+        active, peaks, claims = set(), [], []
+
+        def handler(request):
+            if len(claims) == 4:
+                return httpx.Response(200, json={})
+            index = len(claims)
+            claims.append(index)
+            return httpx.Response(200, json={"taskId": index})
+
+        @asynccontextmanager
+        async def connect(_):
+            async with httpx.AsyncClient(
+                base_url="http://control", transport=httpx.MockTransport(handler)
+            ) as http:
+                yield http
+
+        async def execute_fake(http, model, job):
+            index = job["taskId"]
+            active.add(index)
+            peaks.append(len(active))
+            started[index].set()
+            try:
+                await release[index].wait()
+            finally:
+                active.remove(index)
+
+        monkeypatch.setattr("bunbird.worker.async_client", connect)
+        monkeypatch.setattr("bunbird.worker.execute", execute_fake)
+        task = asyncio.create_task(
+            run(
+                ControlConfig("http://control", "test"),
+                SimpleNamespace(config=SimpleNamespace(name="test", mode="mock")),
+            )
+        )
+        try:
+            await asyncio.wait_for(asyncio.gather(*(e.wait() for e in started[:3])), 2)
+            assert len(claims) == 3 and not started[3].is_set()
+            release[0].set()
+            await asyncio.wait_for(started[3].wait(), 2)
+            assert max(peaks) == 3
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not active
+
+    asyncio.run(scenario())
+
+
+def test_timeout_cleans_execution_before_releasing_server_slot():
+    cleaned, completions = [], []
+
+    class SlowModel:
+        execution_timeout = 0.01
+
+        async def answer(self, _):
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cleaned.append(True)
+
+    def handler(request):
+        if request.url.path.endswith("/complete"):
+            assert cleaned == [True]
+            completions.append(json.loads(request.content))
+        return httpx.Response(200, json={"accepted": True})
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            base_url="http://control", transport=httpx.MockTransport(handler)
+        ) as http:
+            await execute(http, SlowModel(), job())
+
+    asyncio.run(scenario())
+    assert completions[0]["errorCode"] == "MODEL_TIMEOUT"

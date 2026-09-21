@@ -17,6 +17,22 @@ public class TaskService {
     private final String tenant, appId;
     private final Clock clock;
     static final long LEASE_MS = 30_000, DEADLINE_MS = 900_000;
+    static final int MAX_CONCURRENT = 3;
+
+    private void lockScheduler() { db.queryForList("SELECT id FROM scheduler_guard WHERE id=1 FOR UPDATE"); }
+    private int activeCount() {
+        return db.queryForObject("SELECT COUNT(*) FROM task WHERE tenant_id=? AND (status='RUNNING' OR (status='CANCELLED' AND lease_until>?))",Integer.class,tenant,now());
+    }
+    private void notifyCapacityQueue() {
+        if(activeCount()<MAX_CONCURRENT) return;
+        for(var task:db.queryForList("SELECT id,message_id FROM task WHERE tenant_id=? AND status='QUEUED' ORDER BY position",tenant)) {
+            String taskId=(String)task.get("id");
+            if(db.queryForObject("SELECT COUNT(*) FROM run_event WHERE task_id=? AND type='CAPACITY_QUEUE'",Integer.class,taskId)>0) continue;
+            event(taskId,"CAPACITY_QUEUE","并发会话已满，等待执行空位");
+            enqueue(taskId,(String)task.get("message_id"),"⏳ 会话排队中…（最多 3 个并发）");
+            db.update("UPDATE delivery SET task_state='CAPACITY_QUEUE' WHERE task_id=? AND id=(SELECT id FROM delivery WHERE task_id=? ORDER BY position DESC LIMIT 1)",taskId,taskId);
+        }
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     public TaskService(JdbcTemplate db, @Value("${bunbird.tenant}") String tenant,
@@ -46,6 +62,7 @@ public class TaskService {
     @Transactional
     public Map<String, Object> receive(Incoming in) {
         requireIdentity(in);
+        lockScheduler();
         String ingressId = id();
         db.update("INSERT INTO ingress(id,tenant_id,app_id,event_id,message_id,created_at,chat_type) VALUES(?,?,?,?,?,?,?)",
                 ingressId, tenant, appId, in.eventId(), in.messageId(), now(), in.chatType());
@@ -104,6 +121,7 @@ public class TaskService {
         event(taskId, "QUEUED", "已受理，等待执行");
         // A durable reaction-only delivery: no acknowledgement text is sent to the chat.
         enqueue(taskId, in.messageId(), "");
+        notifyCapacityQueue();
         return Map.of("accepted", true, "taskId", taskId);
     }
 
@@ -127,7 +145,7 @@ public class TaskService {
     @Transactional
     public Map<String, Object> cancel(String taskId) {
         var row = task(taskId);
-        int changed = db.update("UPDATE task SET status='CANCELLED',pause_reason=NULL,resume_at=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING','WAITING_QUOTA')", now(), taskId);
+        int changed = db.update("UPDATE task SET status='CANCELLED',pause_reason=NULL,resume_at=NULL,updated_at=? WHERE id=? AND status IN ('QUEUED','RUNNING','WAITING_QUOTA')", now(), taskId);
         if (changed == 1) {
             event(taskId, "CANCELLED", "用户取消");
             enqueue(taskId, (String)row.get("message_id"), "任务 " + taskId + " 已取消。");
@@ -144,6 +162,7 @@ public class TaskService {
 
     @Transactional
     public Map<String, Object> claim(QuotaAdmission admission) {
+        lockScheduler();
         var candidates = db.queryForList("SELECT id,topic_id FROM task WHERE status IN ('QUEUED','WAITING_QUOTA') AND tenant_id=? ORDER BY position LIMIT 100", tenant);
         for (var candidate : candidates) {
             String topicId = (String)candidate.get("topic_id"), taskId = (String)candidate.get("id");
@@ -158,6 +177,7 @@ public class TaskService {
                 if(db.update("UPDATE task SET status='WAITING_QUOTA',pause_reason=?,resume_at=?,updated_at=? WHERE id=? AND status IN ('QUEUED','WAITING_QUOTA')",
                     admission.reason(),admission.resumeAt(),now(),taskId)==0) continue;
                 if(first) {
+                    db.update("UPDATE delivery SET status='FAILED',error_code='WAITING_QUOTA' WHERE task_id=? AND task_state='CAPACITY_QUEUE' AND status='PENDING'",taskId);
                     String reason="QUOTA_WEEKLY_EXHAUSTED".equals(admission.reason())?"周额度已耗尽":"短周期额度已耗尽";
                     String when=admission.resumeAt()==null?"恢复时间暂未确认，将定期检查。":
                         "预计在北京时间 "+java.time.Instant.ofEpochMilli(admission.resumeAt()).atZone(java.time.ZoneId.of("Asia/Shanghai"))
@@ -167,6 +187,10 @@ public class TaskService {
                 }
                 continue;
             }
+            if(activeCount()>=MAX_CONCURRENT) {
+                notifyCapacityQueue();
+                return Map.of();
+            }
             String token = id();
             if (db.update("UPDATE task SET status='RUNNING',pause_reason=NULL,resume_at=NULL,lease_token=?,lease_until=?,deadline=?,updated_at=? WHERE id=? AND status IN ('QUEUED','WAITING_QUOTA')",
                     token, now()+LEASE_MS, now()+DEADLINE_MS, now(), taskId) == 0) continue;
@@ -175,6 +199,8 @@ public class TaskService {
                 db.update("UPDATE delivery SET status='FAILED',error_code='QUOTA_ALREADY_RESUMED' WHERE task_id=? AND task_state='WAITING_QUOTA' AND status='PENDING'",taskId);
             }
             event(taskId, "RUNNING", "Worker 已领取");
+            db.update("UPDATE delivery SET status='FAILED',error_code='TASK_ALREADY_STARTED' WHERE task_id=? AND task_state='CAPACITY_QUEUE' AND status='PENDING'",taskId);
+            notifyCapacityQueue();
             var task = task(taskId);
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);
             Collections.reverse(history);

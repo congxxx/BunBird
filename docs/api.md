@@ -36,3 +36,5 @@ Worker claim 无任务时返回 `{}`，有任务时返回 `taskId, leaseToken, p
 同一用户在同一 Topic 的新任务消息会将旧 QUEUED/RUNNING 任务置为 CANCELLED，错误码 SUPERSEDED。已排队的旧进展丢弃，SUPERSEDED 发送项只关闭旧进展卡片并清除表情，不额外回复取消通知。运行中旧任务保留租约，Worker 终止子进程后提交 stopped（请求体同 heartbeat），新任务才能领取；Worker 失联则等待旧租约到期。重复来源消息和查询命令不触发替换，其他用户或 Topic 不受影响。
 
 V4 增加任务 `pause_reason` 和 `resume_at`（毫秒）。`WAITING_QUOTA` 仅用于尚未开始的任务；Worker claim 在数据库事务外先取得额度决策，在话题锁内暂停或领取。恢复前产生 `QUOTA_RESUMED` 事件并清空暂停字段，仍使用原任务 ID 与会话身份，不重放已执行任务。
+
+V5 增加调度锁表。全租户最多 3 个 RUNNING 或仍持有有效租约的 CANCELLED 任务；接收和领取采用相同的调度锁→话题锁顺序。`CAPACITY_QUEUE` 事件和发送阶段表示一次并发排队提示，任务本身仍为 QUEUED；领取后跳过尚未发送的排队提示。

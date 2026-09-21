@@ -108,6 +108,10 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
             log.info("任务 %s 已停止：取消或租约不可用", task_id)
             return
         if answer not in done:
+            # Release the server slot only after the timed-out process tree has exited.
+            answer.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await answer
             result = {"status": "FAILED", "errorCode": "MODEL_TIMEOUT"}
         else:
             try:
@@ -142,16 +146,24 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
 
 
 async def run(config: ControlConfig, model: Model):
-    log.info("Worker 已启动，模型=%s，模式=%s", model.config.name, model.config.mode)
+    log.info("Worker 已启动，模型=%s，模式=%s，并发上限=3", model.config.name, model.config.mode)
     async with async_client(config) as http:
-        while True:
-            try:
-                response = await http.post("/internal/worker/claim", timeout=15)
-                response.raise_for_status()
-                job = response.json()
-                if job:
-                    await execute(http, model, job)
-                    continue
-            except (httpx.HTTPError, ValueError) as error:
-                log.warning("暂无法领取任务，类型=%s", type(error).__name__)
-            await asyncio.sleep(1)
+
+        async def consume():
+            while True:
+                try:
+                    response = await http.post("/internal/worker/claim", timeout=15)
+                    response.raise_for_status()
+                    job = response.json()
+                    if job:
+                        await execute(http, model, job)
+                        continue
+                except (httpx.HTTPError, ValueError) as error:
+                    log.warning("暂无法领取任务，类型=%s", type(error).__name__)
+                await asyncio.sleep(1)
+
+        # Independent loops keep cancellation/heartbeats responsive for every session.
+        # The database also enforces the cap across multiple Worker processes.
+        async with asyncio.TaskGroup() as group:
+            for _ in range(3):
+                group.create_task(consume())
