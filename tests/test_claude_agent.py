@@ -55,6 +55,10 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
     monkeypatch.setenv("AGENT_SESSION_ROOT", str(tmp_path / "sessions"))
     monkeypatch.setattr("bunbird.claude_agent.shutil.which", lambda _: sys.executable)
     agent = ClaudeAgent(ModelConfig("anthropic", "test-model", "https://test", "test-key"))
+    from bunbird.agent_skills import mount
+
+    _, skill_folder = agent.prepare(job())
+    mount(skill_folder)
     monkeypatch.setattr(agent, "workspace", lambda folder, *_: folder)
     script = tmp_path / "fake.py"
     events = [
@@ -115,6 +119,8 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
 
     asyncio.run(scenario())
     assert "--session-id" in commands[0] and "--resume" in commands[1]
+    for command in commands:
+        assert "read-attachments" in command[command.index("--append-system-prompt") + 1]
     assert job()["prompt"] not in commands[0]
     assert "PRIVATE" not in str(notices) and "do-not-forward" not in str(notices)
     assert notices[2][1] == "已确认需要创建项目文件，接下来写入并检查内容。"
