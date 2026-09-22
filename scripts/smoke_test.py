@@ -65,6 +65,13 @@ def main():
         def do_POST(self):
             assert self.path == "/v1/chat/completions"
             model_calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            if self.headers.get("Authorization") == "Bearer local-test-key":
+                body = b'{"error":{"type":"insufficient_quota"}}'
+                self.send_response(429)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             body = json.dumps(
                 {
                     "choices": [
@@ -110,10 +117,31 @@ def main():
                 "MODEL_NAME": "local-contract-model",
                 "MODEL_BASE_URL": f"http://127.0.0.1:{model_server.server_port}/v1",
                 "MODEL_API_KEY": "local-test-key",
+                "SMOKE_BACKUP_KEY": "local-backup-key",
+                "BUNBIRD_ACCOUNTS_FILE": str(folder / "accounts.json"),
                 "PYTHONIOENCODING": "utf-8",
                 "NO_PROXY": "127.0.0.1,localhost",
                 "WORKSPACE_ROOT": str(folder / "workspaces"),
             }
+            (folder / "accounts.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": ident,
+                            "name": ident,
+                            "mode": "compatible",
+                            "model": "local-contract-model",
+                            "baseUrl": env["MODEL_BASE_URL"],
+                            "keyEnv": key,
+                        }
+                        for ident, key in (
+                            ("primary", "MODEL_API_KEY"),
+                            ("backup", "SMOKE_BACKUP_KEY"),
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
             source = folder / "source"
             source.mkdir()
             git(source, "init", "-b", "main")
@@ -244,21 +272,26 @@ def main():
                         return current["status"] == "SUCCEEDED"
 
                     wait_for(succeeded)
-                    wait_for(lambda: (bridge.pump_once(), len(sent) == 2)[1])
+                    wait_for(lambda: (bridge.pump_once(), len(sent) == 3)[1])
                     result = admin.get(f"/api/tasks/{task_id}").json()
                     assert result["result"] == "跨进程测试回答"
                     assert result["model"] == "local-contract-model"
-                    assert len(model_calls) == 1
+                    assert len(model_calls) == 2
+                    assert result["account_id"] == "backup"
                     deliveries = admin.get(f"/api/tasks/{task_id}/deliveries").json()
                     assert all(d["status"] == "SENT" for d in deliveries)
-                    assert len({r.request_body.uuid for r in sent}) == 2
+                    assert len({r.request_body.uuid for r in sent}) == 3
                     assert all(r.message_id == "om-question" for r in sent)
                     assert all(r.request_body.reply_in_thread is True for r in sent)
                     events = admin.get(f"/api/tasks/{task_id}/events").json()
                     assert [e["type"] for e in events] == [
                         "QUEUED",
                         "RUNNING",
+                        "ACCOUNT_SELECTED",
                         "PROGRESS_STARTED",
+                        "PROGRESS_UPDATE_1",
+                        "ACCOUNT_UNAVAILABLE",
+                        "ACCOUNT_SWITCHED",
                         "SUCCEEDED",
                     ]
                     workspace_incoming = {
@@ -272,30 +305,30 @@ def main():
                     response.raise_for_status()
                     task_id = response.json()["taskId"]
                     wait_for(succeeded)
-                    wait_for(lambda: (bridge.pump_once(), len(sent) == 5)[1])
+                    wait_for(lambda: (bridge.pump_once(), len(sent) == 6)[1])
                     current = admin.get(f"/api/tasks/{task_id}").json()
                     assert current["model"] == "git-workspace"
                     assert "提交：未执行" in current["result"]
-                    assert len(model_calls) == 1
+                    assert len(model_calls) == 2
                     assert (
                         Workspaces(env["WORKSPACE_ROOT"], "tenant-test").list()[0]["task_id"]
                         == task_id
                     )
-                    assert all(r.request_body.reply_in_thread for r in sent[2:])
-                    assert [r.request_body.msg_type for r in sent[2:]] == [
+                    assert all(r.request_body.reply_in_thread for r in sent[3:])
+                    assert [r.request_body.msg_type for r in sent[3:]] == [
                         "interactive",
                         "interactive",
                         "post",
                     ]
                     final_post = json.loads(sent[-1].request_body.content)
                     assert final_post["zh_cn"]["content"][0][0]["text"] == current["result"]
-                    assert len(patched) == 1
+                    assert len(patched) == 2
                     assert "最终结论见下方消息" in patched[0].request_body.content
                     print(
                         "PASS: inbox recovery, 10 duplicate replays, database restart, "
                         "Java -> Python -> HTTP model and real Git workspace -> "
                         "captured Feishu cards; "
-                        "one model call"
+                        "quota failure -> backup account -> success, no duplicate successful call"
                     )
                 except Exception:
                     # Synthetic data only; real credentials are never passed to these processes.

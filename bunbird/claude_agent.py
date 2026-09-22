@@ -14,7 +14,7 @@ from pathlib import Path
 
 from bunbird.agent_skills import instructions as skill_instructions
 from bunbird.attachments import prepare as prepare_attachments
-from bunbird.model import ModelError
+from bunbird.model import ModelError, provider_account_error
 from bunbird.workspaces import Workspaces, exclusive, git
 
 POLICY = (
@@ -172,6 +172,13 @@ class ClaudeAgent:
             cwd = await asyncio.to_thread(self.workspace, folder, job, key)
             prompt = prepare_attachments(job, folder)
             state = folder / "initialized"
+            if job.get("accountRetry") and state.exists():
+                prompt = (
+                    "上一执行因模型账号不可用而中断，现已切换账号。继续完成本轮尚未完成的请求。"
+                    "先核对会话记录、工具结果和当前文件状态，不重复已成功的写入、提交或外部操作。"
+                    "若无法确认某项操作是否完成，先核实，不能盲目重做。\n本轮原始要求与附件供参考：\n"
+                    + prompt
+                )
             if not state.exists():
                 await progress(
                     "STARTED",
@@ -217,6 +224,7 @@ class ClaudeAgent:
                 ),
             )
             result = None
+            account_error = None
             revision, last_update = 0, 0.0
             streamed_text, pending_summary, last_summary = "", "", ""
 
@@ -262,14 +270,29 @@ class ClaudeAgent:
                             streamed_text = (streamed_text + delta.get("text", ""))[-16000:]
                             await report(public_progress(streamed_text))
                     if event.get("type") == "assistant":
+                        account_error = {
+                            "authentication_failed": "ACCOUNT_AUTH",
+                            "billing_error": "ACCOUNT_QUOTA",
+                            "rate_limit": "ACCOUNT_RATE_LIMIT",
+                        }.get(event.get("error"), account_error)
                         blocks = event.get("message", {}).get("content", [])
                         text = "\n".join(
                             b.get("text", "") for b in blocks if b.get("type") == "text"
                         )
+                        # Some compatible providers use unknown/invalid_request for business errors.
+                        # Parse only CLI-marked API failures, never ordinary model-generated text.
+                        if event.get("error") and "{" in text:
+                            try:
+                                body, _ = json.JSONDecoder().raw_decode(text[text.index("{") :])
+                                account_error = provider_account_error(0, body) or account_error
+                            except ValueError:
+                                pass
                         await report(public_progress(text), force=True)
                     if event.get("type") == "result":
                         result = event
                 await process.wait()
+                if account_error:
+                    raise ModelError(account_error)
                 if process.returncode or not result or result.get("is_error"):
                     raise ModelError("CLAUDE_EXECUTION_FAILED")
                 if result.get("permission_denials"):

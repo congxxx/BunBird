@@ -22,6 +22,30 @@ class ModelError(Exception):
         super().__init__(code)
 
 
+def provider_account_error(status, body):
+    failure = {401: "ACCOUNT_AUTH", 402: "ACCOUNT_QUOTA", 429: "ACCOUNT_RATE_LIMIT"}.get(status)
+    if not isinstance(body, dict):
+        return failure
+    base = body.get("base_resp")
+    if isinstance(base, dict):
+        failure = {
+            1002: "ACCOUNT_RATE_LIMIT",
+            1004: "ACCOUNT_AUTH",
+            1008: "ACCOUNT_QUOTA",
+            2049: "ACCOUNT_AUTH",
+            2056: "ACCOUNT_QUOTA",
+        }.get(base.get("status_code"), failure)
+    error = body.get("error")
+    if isinstance(error, dict):
+        failure = {
+            "authentication_error": "ACCOUNT_AUTH",
+            "billing_error": "ACCOUNT_QUOTA",
+            "rate_limit_error": "ACCOUNT_RATE_LIMIT",
+            "insufficient_quota": "ACCOUNT_QUOTA",
+        }.get(error.get("type"), failure)
+    return failure
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     mode: str
@@ -99,7 +123,14 @@ class Model:
                         headers=headers,
                         json=payload,
                     )
-                    if response.status_code == 429 or response.status_code >= 500:
+                    try:
+                        error_body = response.json()
+                    except ValueError:
+                        error_body = {}
+                    failure = provider_account_error(response.status_code, error_body)
+                    if failure:
+                        raise ModelError(failure)
+                    if response.status_code >= 500:
                         raise ModelError("MODEL_TEMPORARY")
                     if response.status_code >= 400:
                         raise ModelError(f"MODEL_HTTP_{response.status_code}")

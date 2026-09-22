@@ -109,7 +109,7 @@ def test_auth_failure_does_not_retry_or_expose_body():
         ModelConfig("compatible", "test", "https://model.test/v1", "key"),
         httpx.MockTransport(handler),
     )
-    with pytest.raises(ModelError, match="^MODEL_HTTP_401$"):
+    with pytest.raises(ModelError, match="^ACCOUNT_AUTH$"):
         asyncio.run(model.answer(job()))
     assert len(calls) == 1
 
@@ -124,7 +124,7 @@ def test_transient_model_failure_retries_bounded(monkeypatch):
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(429)
+        return httpx.Response(503)
 
     model = Model(
         ModelConfig("compatible", "test", "https://model.test/v1", "key"),

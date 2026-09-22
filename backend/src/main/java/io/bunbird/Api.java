@@ -10,10 +10,9 @@ import static io.bunbird.Protocol.*;
 @RestController
 public class Api {
     private final TaskService tasks;
-    private final QuotaService quota;
-    private final String model;
-    public Api(TaskService tasks, QuotaService quota, @org.springframework.beans.factory.annotation.Value("${MODEL_NAME:}") String model) {
-        this.tasks = tasks; this.quota=quota; this.model=model;
+    private final AccountPool accounts;
+    public Api(TaskService tasks, AccountPool accounts) {
+        this.tasks = tasks; this.accounts=accounts;
     }
     @GetMapping("/health") public Map<String, String> health() { return Map.of("status", "ok", "service", "bunbird-control"); }
     @PostMapping("/internal/bridge/events") public Map<String, Object> receive(@Valid @RequestBody Incoming incoming) {
@@ -28,7 +27,19 @@ public class Api {
     @PostMapping("/internal/worker/claim") public Object claim() {
         // Do network I/O before entering the claim transaction or taking any topic lock.
         if(!tasks.hasWaitingTasks()) return Map.of();
-        return tasks.claim(QuotaAdmission.from(quota.get(),model,System.currentTimeMillis()));
+        return tasks.claim(accounts.admission());
+    }
+    public record SelectAccount(@jakarta.validation.constraints.NotBlank String leaseToken,
+        @jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Size(max=20) List<String> excluded,
+        String failedAccount,String errorCode) {}
+    @PostMapping("/internal/worker/tasks/{id}/account") public Object selectAccount(@PathVariable String id,@Valid @RequestBody SelectAccount body) {
+        tasks.accountFailure(id,body.leaseToken(),body.failedAccount(),body.errorCode(),accounts);
+        var selected=accounts.select(body.excluded());
+        return tasks.assignAccount(id,body.leaseToken(),selected,accounts.admission());
+    }
+    @GetMapping("/api/accounts") public Object accounts() { return accounts.snapshot(); }
+    @PostMapping("/api/accounts/{id}/{action}") public Object accountAction(@PathVariable String id,@PathVariable String action) {
+        accounts.change(id,action); return Map.of("accepted",true);
     }
     @PostMapping("/internal/worker/tasks/{id}/heartbeat") public Object heartbeat(@PathVariable String id, @Valid @RequestBody Lease body) { return tasks.heartbeat(id, body.leaseToken()); }
     @PostMapping("/internal/worker/tasks/{id}/stopped") public Object stopped(@PathVariable String id, @Valid @RequestBody Lease body) { return tasks.stopped(id, body.leaseToken()); }

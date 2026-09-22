@@ -7,6 +7,7 @@ import sys
 
 import httpx
 
+from bunbird.account_pool import PoolWaiting
 from bunbird.config import ControlConfig
 from bunbird.control import async_client
 from bunbird.model import Model, ModelError
@@ -52,51 +53,7 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
 
         if hasattr(model, "answer_with_progress"):
             return await model.answer_with_progress(job, progress)
-        if job.get("attachments"):
-            raise ModelError("ATTACHMENTS_REQUIRE_AGENT")
-        target = target_from_prompt(job["prompt"])
-        name = "Git 工作空间准备" if target is not None else model.config.name
-        await progress("STARTED", f"Session：{task_id}\n执行方式：{name}")
-        if target is None:
-            return await model.answer(job)
-        await progress("WORKSPACE", "正在准备独立仓库和任务工作区，完成后将报告目录、分支与提交。")
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "bunbird.workspace_task",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            **({"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}),
-        )
-        try:
-            output, _ = await process.communicate(json.dumps(job).encode())
-            if process.returncode:
-                try:
-                    code = json.loads(output).get("error")
-                except (ValueError, AttributeError):
-                    code = None
-                raise ModelError(code if code in REQUEST_ERRORS else "WORKSPACE_FAILED")
-            return json.loads(output)
-        finally:
-            if process.returncode is None:
-                if os.name == "nt":
-                    killer = await asyncio.create_subprocess_exec(
-                        "taskkill",
-                        "/PID",
-                        str(process.pid),
-                        "/T",
-                        "/F",
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                        creationflags=0x08000000,
-                    )
-                    await killer.wait()
-                else:
-                    import signal
-
-                    os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+        return await plain_answer(model, job, progress)
 
     answer = asyncio.create_task(perform())
     heartbeat = asyncio.create_task(monitor())
@@ -118,6 +75,8 @@ async def execute(http: httpx.AsyncClient, model: Model, job: dict):
         else:
             try:
                 result = {"status": "SUCCEEDED", **answer.result()}
+            except PoolWaiting:
+                return
             except ModelError as error:
                 result = {"status": "FAILED", "errorCode": error.code}
             except Exception as error:
@@ -169,3 +128,52 @@ async def run(config: ControlConfig, model: Model):
         async with asyncio.TaskGroup() as group:
             for _ in range(3):
                 group.create_task(consume())
+
+
+async def plain_answer(model, job, progress):
+    task_id = job["taskId"]
+    if job.get("attachments"):
+        raise ModelError("ATTACHMENTS_REQUIRE_AGENT")
+    target = target_from_prompt(job["prompt"])
+    name = "Git 工作空间准备" if target is not None else model.config.name
+    await progress("STARTED", f"Session：{task_id}\n执行方式：{name}")
+    if target is None:
+        return await model.answer(job)
+    await progress("WORKSPACE", "正在准备独立仓库和任务工作区，完成后将报告目录、分支与提交。")
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "bunbird.workspace_task",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        **({"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}),
+    )
+    try:
+        output, _ = await process.communicate(json.dumps(job).encode())
+        if process.returncode:
+            try:
+                code = json.loads(output).get("error")
+            except (ValueError, AttributeError):
+                code = None
+            raise ModelError(code if code in REQUEST_ERRORS else "WORKSPACE_FAILED")
+        return json.loads(output)
+    finally:
+        if process.returncode is None:
+            if os.name == "nt":
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=0x08000000,
+                )
+                await killer.wait()
+            else:
+                import signal
+
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()

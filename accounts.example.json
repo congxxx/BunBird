@@ -1,0 +1,20 @@
+[
+  {
+    "id": "minimax-primary",
+    "name": "MiniMax 主账号",
+    "mode": "anthropic",
+    "model": "MiniMax-M3",
+    "baseUrl": "https://api.minimaxi.com/anthropic",
+    "keyEnv": "MODEL_API_KEY",
+    "enabled": true
+  },
+  {
+    "id": "minimax-backup",
+    "name": "MiniMax 备用账号",
+    "mode": "anthropic",
+    "model": "MiniMax-M3",
+    "baseUrl": "https://api.minimaxi.com/anthropic",
+    "keyEnv": "MINIMAX_BACKUP_API_KEY",
+    "enabled": true
+  }
+]

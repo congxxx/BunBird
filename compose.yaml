@@ -28,6 +28,10 @@ services:
       BUNBIRD_BRIDGE_TOKEN: ${BUNBIRD_BRIDGE_TOKEN:?Required}
       BUNBIRD_WORKER_TOKEN: ${BUNBIRD_WORKER_TOKEN:?Required}
       BUNBIRD_ADMIN_TOKEN: ${BUNBIRD_ADMIN_TOKEN:?Required}
+      MODEL_MODE: ${MODEL_MODE:-mock}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_NAME: ${MODEL_NAME:-mock-demo}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
     ports:
       - 127.0.0.1:8080:8080
     depends_on:

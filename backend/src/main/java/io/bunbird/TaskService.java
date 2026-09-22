@@ -145,10 +145,10 @@ public class TaskService {
     }
 
     public List<Map<String, Object>> tasks() {
-        return db.queryForList("SELECT id,topic_id,sender_id,status,model,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? ORDER BY position DESC LIMIT 100", tenant);
+        return db.queryForList("SELECT id,topic_id,sender_id,status,model,account_id,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? ORDER BY position DESC LIMIT 100", tenant);
     }
     public Map<String, Object> task(String taskId) {
-        var rows = db.queryForList("SELECT id,tenant_id,topic_id,sender_id,message_id,prompt,status,result,error_code,model,usage_json,pause_reason,resume_at,created_at,updated_at FROM task WHERE id=? AND tenant_id=?", taskId, tenant);
+        var rows = db.queryForList("SELECT id,tenant_id,topic_id,sender_id,message_id,prompt,status,result,error_code,model,account_id,usage_json,pause_reason,resume_at,created_at,updated_at FROM task WHERE id=? AND tenant_id=?", taskId, tenant);
         if (rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND);
         return rows.getFirst();
     }
@@ -197,7 +197,8 @@ public class TaskService {
                     admission.reason(),admission.resumeAt(),now(),taskId)==0) continue;
                 if(first) {
                     db.update("UPDATE delivery SET status='FAILED',error_code='WAITING_QUOTA' WHERE task_id=? AND task_state='CAPACITY_QUEUE' AND status='PENDING'",taskId);
-                    String reason="QUOTA_WEEKLY_EXHAUSTED".equals(admission.reason())?"周额度已耗尽":"短周期额度已耗尽";
+                    String reason="ACCOUNT_POOL_UNAVAILABLE".equals(admission.reason())?"所有账号暂不可用":
+                        "QUOTA_WEEKLY_EXHAUSTED".equals(admission.reason())?"周额度已耗尽":"短周期额度已耗尽";
                     String when=admission.resumeAt()==null?"恢复时间暂未确认，将定期检查。":
                         "预计在北京时间 "+java.time.Instant.ofEpochMilli(admission.resumeAt()).atZone(java.time.ZoneId.of("Asia/Shanghai"))
                             .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))+" 重置，确认额度恢复后继续。";
@@ -224,7 +225,8 @@ public class TaskService {
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);
             Collections.reverse(history);
             return Map.of("taskId", taskId, "leaseToken", token, "prompt", task.get("prompt"), "history", history, "tenantId", tenant, "topicId", topicId, "senderId", task.get("sender_id"), "attachments",
-                db.queryForList("SELECT id,file_name AS name,file_size AS size,sha256 FROM attachment WHERE task_id=? AND tenant_id=? ORDER BY created_at,id",taskId,tenant));
+                db.queryForList("SELECT id,file_name AS name,file_size AS size,sha256 FROM attachment WHERE task_id=? AND tenant_id=? ORDER BY created_at,id",taskId,tenant),
+                "accountRetry",current.get("account_id")!=null);
         }
         return Map.of();
     }
@@ -278,6 +280,52 @@ public class TaskService {
                 : "任务执行失败（" + Objects.toString(result.errorCode(), "MODEL_FAILED") + "），可稍后重新发送问题。";
         enqueue(taskId, (String)task(taskId).get("message_id"), result.status().equals("SUCCEEDED") ? body : body + "\n\n任务 " + taskId);
         return Map.of("accepted", true);
+    }
+
+    private Map<String,Object> leasedTask(String taskId,String token) {
+        var rows=db.queryForList("SELECT * FROM task WHERE id=? AND tenant_id=? FOR UPDATE",taskId,tenant);
+        if(rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND);
+        var row=rows.getFirst();
+        if(!"RUNNING".equals(row.get("status")) || !token.equals(row.get("lease_token"))
+            || ((Number)row.get("lease_until")).longValue()<=now()
+            || ((Number)row.get("deadline")).longValue()<=now()) throw new ResponseStatusException(CONFLICT,"Lease lost");
+        return row;
+    }
+
+    @Transactional
+    public void accountFailure(String taskId,String token,String failed,String reason,AccountPool pool) {
+        var row=leasedTask(taskId,token);
+        if(failed!=null) {
+            if(!failed.equals(row.get("account_id"))) throw new ResponseStatusException(CONFLICT);
+            pool.failure(failed,reason);
+            event(taskId,"ACCOUNT_UNAVAILABLE",failed+": "+reason);
+        }
+    }
+
+    @Transactional
+    public Map<String,Object> assignAccount(String taskId,String token,Map<String,Object> account,QuotaAdmission admission) {
+        var row=leasedTask(taskId,token);
+        if(account.isEmpty()) {
+            db.update("UPDATE task SET status='WAITING_QUOTA',pause_reason='ACCOUNT_POOL_UNAVAILABLE',resume_at=?,lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=?",
+                admission.resumeAt(),now(),taskId);
+            event(taskId,"WAITING_QUOTA","所有账号暂不可用，保留会话与工作区");
+            enqueue(taskId,(String)row.get("message_id"),"可用账号暂时不足，已保留会话与工作区，稍后自动检查并继续。");
+            return Map.of("waiting",true);
+        }
+        String next=(String)account.get("id");
+        if(!next.equals(row.get("account_id"))) {
+            String previous=Objects.toString(row.get("account_id"),"");
+            db.update("UPDATE task SET account_id=?,updated_at=? WHERE id=?",next,now(),taskId);
+            event(taskId,previous.isEmpty()?"ACCOUNT_SELECTED":"ACCOUNT_SWITCHED",previous.isEmpty()?next:previous+" → "+next);
+        }
+        var selected=new LinkedHashMap<>(account);
+        int offset=0;
+        for(var type:db.queryForList("SELECT type FROM run_event WHERE task_id=? AND type LIKE 'PROGRESS_UPDATE_%'",String.class,taskId)) {
+            try { offset=Math.max(offset,Integer.parseInt(type.substring("PROGRESS_UPDATE_".length()))); }
+            catch(NumberFormatException ignored) {}
+        }
+        selected.put("progressOffset",offset);
+        return selected;
     }
 
     @Transactional

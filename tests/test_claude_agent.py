@@ -37,6 +37,75 @@ def test_session_identity_is_stable_and_scoped():
     )
 
 
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        ("rate_limit", "ACCOUNT_RATE_LIMIT"),
+        ("billing_error", "ACCOUNT_QUOTA"),
+        ("authentication_failed", "ACCOUNT_AUTH"),
+        ("unknown", "ACCOUNT_QUOTA"),
+    ],
+)
+def test_account_errors_allow_resume_with_new_credentials(tmp_path, monkeypatch, failure, expected):
+    monkeypatch.setenv("AGENT_SESSION_ROOT", str(tmp_path / "sessions"))
+    monkeypatch.setattr("bunbird.claude_agent.shutil.which", lambda _: sys.executable)
+    script = tmp_path / "fake.py"
+    events = [
+        {"type": "system", "subtype": "init"},
+        {
+            "type": "assistant",
+            "error": failure,
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": 'API Error: {"base_resp":{"status_code":2056}}'
+                        if failure == "unknown"
+                        else "private provider error",
+                    }
+                ]
+            },
+        },
+        {"type": "result", "is_error": True},
+    ]
+    script.write_text(
+        "import sys\nsys.stdin.read()\n"
+        + "\n".join(f"print({json.dumps(json.dumps(e))})" for e in events),
+        encoding="utf-8",
+    )
+    original = asyncio.create_subprocess_exec
+    processes = []
+    commands = []
+    environments = []
+
+    async def spawn(*args, **kwargs):
+        commands.append(args)
+        environments.append(kwargs["env"])
+        proc = await original(sys.executable, str(script), **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    async def progress(*_):
+        pass
+
+    async def scenario():
+        for key in ("first-key", "backup-key"):
+            agent = ClaudeAgent(ModelConfig("anthropic", "test", "https://test", key))
+            monkeypatch.setattr(agent, "workspace", lambda folder, *_: folder)
+            with pytest.raises(ModelError, match=expected):
+                await agent.answer_with_progress(job(accountRetry=key == "backup-key"), progress)
+            assert processes[-1].returncode is not None
+
+    asyncio.run(scenario())
+    assert "--session-id" in commands[0] and "--resume" in commands[1]
+    assert commands[0][-1] == commands[1][-1]
+    assert environments[0]["ANTHROPIC_API_KEY"] == "first-key"
+    assert environments[1]["ANTHROPIC_API_KEY"] == "backup-key"
+    assert environments[0]["CLAUDE_CONFIG_DIR"] == environments[1]["CLAUDE_CONFIG_DIR"]
+
+
 def test_agent_environment_omits_platform_credentials(monkeypatch, tmp_path):
     monkeypatch.setenv("FEISHU_APP_SECRET", "feishu-secret")
     monkeypatch.setenv("BUNBIRD_WORKER_TOKEN", "worker-secret")

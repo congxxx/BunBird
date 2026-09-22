@@ -33,7 +33,7 @@ class TaskServiceTest {
 
     @BeforeEach void clear() {
         org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","UNSUPPORTED"));
-        for (String table : List.of("attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
+        for (String table : List.of("account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
     }
     Incoming message(String event, String user, String topic, String text) {
         return new Incoming("tenant-test","cli-test",event,"om-"+event,"chat-test",user,topic,text,"group");
@@ -383,6 +383,25 @@ class TaskServiceTest {
         service.stopped(oldId,(String)old.get("leaseToken"));
         assertThat(service.claim()).isNotEmpty();
         assertThat(service.claim()).isEmpty();
+    }
+
+    @Test void accountSelectionIsLeaseBoundAndAllFailedTasksWait() throws Exception {
+        String id=submit("account-test","user","topic","hello");
+        var job=service.claim();
+        String token=(String)job.get("leaseToken");
+        mvc.perform(post("/internal/worker/tasks/"+id+"/account").header("Authorization",WORKER)
+            .contentType("application/json").content(json.writeValueAsString(Map.of("leaseToken",token,"excluded",List.of()))))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.id").value("environment"))
+            .andExpect(jsonPath("$.key").doesNotExist());
+        mvc.perform(post("/internal/worker/tasks/"+id+"/account").header("Authorization",WORKER)
+            .contentType("application/json").content(json.writeValueAsString(Map.of("leaseToken",token,"excluded",List.of("environment"),"failedAccount","environment","errorCode","ACCOUNT_RATE_LIMIT"))))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.waiting").value(true));
+        assertThat(service.task(id)).containsEntry("status","WAITING_QUOTA").containsEntry("account_id","environment");
+        mvc.perform(post("/internal/worker/tasks/"+id+"/account").header("Authorization",WORKER)
+            .contentType("application/json").content(json.writeValueAsString(Map.of("leaseToken",token,"excluded",List.of(),"failedAccount","environment","errorCode","ACCOUNT_AUTH"))))
+            .andExpect(status().isConflict());
+        assertThat(db.queryForObject("SELECT failures FROM account_state WHERE id='environment'",Integer.class)).isEqualTo(1);
+        mvc.perform(get("/api/accounts").header("Authorization",WORKER)).andExpect(status().isUnauthorized());
     }
 
     Incoming fileMessage(String event,String user,String topic) {

@@ -1,0 +1,9 @@
+ALTER TABLE task ADD COLUMN account_id VARCHAR(64);
+CREATE TABLE account_state (
+ id VARCHAR(64) PRIMARY KEY,
+ reason VARCHAR(64),
+ retry_at BIGINT NOT NULL DEFAULT 0,
+ disabled BOOLEAN NOT NULL DEFAULT FALSE,
+ failures INT NOT NULL DEFAULT 0,
+ updated_at BIGINT NOT NULL
+);

@@ -71,20 +71,17 @@ def main():
 
             Bridge(FeishuConfig.load(), ControlConfig.load("bridge")).run()
         elif args.command == "worker":
-            from bunbird.model import Model, ModelConfig
+            from bunbird.model import ModelConfig
             from bunbird.worker import run
 
             config = ControlConfig.load("worker")
             import os
 
-            if os.getenv("AGENT_EXECUTOR", "model") == "claude":
-                from bunbird.claude_agent import ClaudeAgent
-
-                executor = ClaudeAgent(ModelConfig.load())
-            elif os.getenv("AGENT_EXECUTOR", "model") == "model":
-                executor = Model(ModelConfig.load())
-            else:
+            if os.getenv("AGENT_EXECUTOR", "model") not in {"claude", "model"}:
                 raise ValueError("AGENT_EXECUTOR 必须是 model 或 claude")
+            from bunbird.account_pool import AccountExecutor
+
+            executor = AccountExecutor(config, ModelConfig.load())
             asyncio.run(run(config, executor))
         else:
             from bunbird.control import client

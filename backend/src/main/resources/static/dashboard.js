@@ -16,9 +16,9 @@ function render(data) {
   $("bars").setAttribute("aria-label",data.daily.map(d=>`${d.date} ${d.usage.total} Token`).join("；"));
   $("models").replaceChildren();data.models.forEach(m=>{const row=node("div",null,"model-row");row.append(node("span",m.model),node("b",fmt(m.usage.total)));$("models").append(row);});
   if(!data.models.length)$("models").append(node("p","暂无已上报的用量","muted"));
-  $("account-list").replaceChildren();data.accounts.forEach(a=>{const item=node("article",null,"panel account");const main=node("div");main.append(node("h2",a.name),node("p",`${a.executor} · ${a.model}`));const meta=node("div",null,"account-meta");meta.append(node("span","环境配置","pill"),node("div","套餐额度见下方 · 自动切换：未启用"));item.append(main,meta);$("account-list").append(item);});
-  $("task-list").replaceChildren();data.recent.forEach(t=>{const row=node("tr");row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})));const id=node("td",t.id.slice(0,8));id.title=t.id;row.append(id,node("td",t.model||"—"));const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));if(t.status==="WAITING_QUOTA") {
-    const reasons={QUOTA_WEEKLY_EXHAUSTED:"周额度已耗尽",QUOTA_INTERVAL_EXHAUSTED:"短周期额度已耗尽",QUOTA_UNCONFIRMED:"暂时无法确认额度，保留等待"};
+
+  $("task-list").replaceChildren();data.recent.forEach(t=>{const row=node("tr");row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})));const id=node("td",t.id.slice(0,8));id.title=t.id;row.append(id,node("td",(t.model||"—")+(t.account_id?` / ${t.account_id}`:"")));const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));if(t.status==="WAITING_QUOTA") {
+    const reasons={QUOTA_WEEKLY_EXHAUSTED:"周额度已耗尽",QUOTA_INTERVAL_EXHAUSTED:"短周期额度已耗尽",QUOTA_UNCONFIRMED:"暂时无法确认额度，保留等待",ACCOUNT_POOL_UNAVAILABLE:"所有账号暂不可用"};
     status.append(node("div",reasons[t.pause_reason]||"等待额度检查","note"));
     status.append(node("div",t.resume_at?`预计 ${new Date(t.resume_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})} 恢复（北京时间）`:"恢复时间待确认","note"));
   }row.append(status,node("td",t.usage?fmt(t.usage.total):"未上报"));$("task-list").append(row);});
@@ -29,7 +29,7 @@ async function refresh() {
   if(!credential||pending)return;pending=true;$("refresh").disabled=true;const version=generation;
   try { const res=await fetch(`/api/dashboard?days=${$("days").value}`,{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
     if(!res.ok)throw new Error(res.status===401?"凭据无效，请检查管理员凭据。":"管理服务暂时不可用，请稍后刷新。");
-    const data=await res.json();if(version!==generation)return;render(data);refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
+    const data=await res.json();if(version!==generation)return;render(data);refreshAccounts();refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
   } catch(e) {if(version!==generation)return;text("error",e.name==="TimeoutError"?"请求超时，请检查本地服务。":e.message);$("error").hidden=false;text("connection","连接异常");$("connection").classList.remove("online");}
   finally {pending=false;$("refresh").disabled=false;}
 }
@@ -51,7 +51,7 @@ function renderQuota(data) {
     progress.setAttribute("aria-label",`${w.model} 剩余额度 ${w.remainingPercent}%`);card.append(progress);
     if(w.resetsAt)card.append(node("p",`重置：${new Date(w.resetsAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})}（北京时间）`,"note"));
     if(w.resetsAt&&w.startsAt&&w.resetsAt>w.startsAt)card.append(node("small",`实际窗口 ${Math.round((w.resetsAt-w.startsAt)/3600000*10)/10} 小时`,"muted"));
-    if(data.status==="AVAILABLE"&&w.model==="general"&&w.remainingPercent<=10)card.append(node("p",w.remainingPercent===0?"额度已耗尽，新任务将等待恢复。":"额度偏低，建议留意后续任务。","quota-warning"));
+    if(data.status==="AVAILABLE"&&w.model==="general"&&w.remainingPercent<=10)card.append(node("p",w.remainingPercent===0?"该账号额度已耗尽，将尝试其他可用账号。":"额度偏低，建议留意后续任务。","quota-warning"));
     grid.append(card);
   });panel.append(grid);
 }
@@ -64,4 +64,45 @@ async function refreshQuota() {
   } catch {
     if(version===generation)renderQuota({message:"套餐额度暂时无法查询，请稍后刷新。"});
   } finally {quotaPending=false;}
+}
+
+let accountsPending=false;
+const accountReasons={ACCOUNT_AUTH:"认证失败，请更新密钥后重置",ACCOUNT_QUOTA:"额度或余额不足",ACCOUNT_RATE_LIMIT:"服务商限流，冷却中",ACCOUNT_DISABLED:"管理员已停用",ACCOUNT_UNCONFIGURED:"未启用或缺少凭据",QUOTA_INTERVAL_EXHAUSTED:"短周期额度耗尽",QUOTA_WEEKLY_EXHAUSTED:"周额度耗尽",QUOTA_UNCONFIRMED:"额度暂未确认"};
+async function accountAction(id,action,button) {
+  button.disabled=true;
+  try {
+    const response=await fetch(`/api/accounts/${encodeURIComponent(id)}/${action}`,{method:"POST",headers:{Authorization:`Bearer ${credential}`},signal:AbortSignal.timeout(10000)});
+    if(!response.ok)throw new Error();
+    await refreshAccounts();
+  } catch {text("error","账号状态更新失败，请刷新后重试。");$("error").hidden=false;}
+  finally {button.disabled=false;}
+}
+async function refreshAccounts() {
+  if(!credential||accountsPending)return;accountsPending=true;const version=generation;
+  try {
+    const response=await fetch("/api/accounts",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(15000)});
+    if(!response.ok)throw new Error();
+    const data=await response.json();if(version!==generation)return;
+    const list=$("account-list");list.replaceChildren(node("p",`自动切换已启用 · 已登记 ${data.configuredCount} 个账号 · 按配置顺序选择` ,"note"));
+    if(data.configuredCount<2)list.append(node("p","当前只有一个账号，添加备用账号后才能实际切换。","note"));
+    data.accounts.forEach(a=>{
+      const item=node("article",null,"panel account"),main=node("div"),meta=node("div",null,"account-meta");
+      main.append(node("h2",a.name),node("p",`${a.id} · ${a.executor} · ${a.model}`));
+      meta.append(node("span",({ALLOW:a.quota.status==="UNSUPPORTED"?"可尝试":"可用",UNKNOWN:"额度未知",BLOCK:"暂不可用"})[a.status]||a.status,"pill"));
+      if(a.reason)meta.append(node("p",accountReasons[a.reason]||a.reason,"note"));
+      if(a.retryAt)meta.append(node("p",`下次检查：${new Date(a.retryAt).toLocaleString("zh-CN")}`,"note"));
+      meta.append(node("p",`已记录 ${a.failures} 次账号异常`,"note"));
+      (a.quota.windows||[]).filter(w=>w.model==="general"||w.model===a.model).forEach(w=>meta.append(node("p",`${w.kind==="weekly"?"周":"短周期"}额度：${w.remainingPercent}%${a.quota.status==="STALE"?"（旧数据）":""}`,"note")));
+      if(a.quota.status!=="AVAILABLE")meta.append(node("p",a.quota.message||"该渠道未接入额度查询，按实际调用结果切换。","note"));
+      const toggle=node("button",a.disabled?"启用":"停用","secondary"),reset=node("button","清除冷却 / 重试认证","secondary");
+      toggle.onclick=()=>accountAction(a.id,a.disabled?"enable":"disable",toggle);
+      reset.onclick=()=>accountAction(a.id,"reset",reset);
+      meta.append(toggle,reset);item.append(main,meta);list.append(item);
+    });
+    if(data.switches.length) {
+      list.append(node("h3","最近自动切换"));
+      data.switches.forEach(s=>list.append(node("p",`${new Date(s.created_at).toLocaleString("zh-CN")} · ${s.detail} · 任务 ${s.task_id.slice(0,8)}`,"note")));
+    }
+  } catch {if(version===generation)$("account-list").replaceChildren(node("p","账号池状态暂时不可用，请刷新重试。","note"));}
+  finally {accountsPending=false;}
 }
