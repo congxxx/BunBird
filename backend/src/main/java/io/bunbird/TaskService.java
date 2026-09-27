@@ -44,7 +44,7 @@ public class TaskService {
     }
     private long now() { return clock.millis(); }
     private String id() { return UUID.randomUUID().toString(); }
-    private void requireIdentity(Incoming in) {
+    void requireIdentity(Incoming in) {
         if (!tenant.equals(in.tenantId()) || !appId.equals(in.appId()))
             throw new ResponseStatusException(FORBIDDEN, "Application or tenant not allowed");
     }
@@ -61,6 +61,10 @@ public class TaskService {
 
     @Transactional
     public Map<String, Object> receive(Incoming in) {
+        return receive(in,List.of());
+    }
+    @Transactional
+    public Map<String, Object> receive(Incoming in,List<AccountPool.ModelOption> models) {
         requireIdentity(in);
         lockScheduler();
         String ingressId = id();
@@ -89,12 +93,14 @@ public class TaskService {
         String[] words = text.split("\\s+", 2);
         String command = words[0].toLowerCase(Locale.ROOT);
         if (command.startsWith("/") && !command.equals("/workspace")) {
-            if (command.equals("/attachment-too-large")) {
+            if (command.equals("/model")) {
+                modelCommand(in,topicId,words.length==2?words[1].strip():"",models);
+            } else if (command.equals("/attachment-too-large")) {
                 enqueue(null,in.messageId(),"附件超过 10 MB，未保存。请缩小文件后重新发送。");
             } else if (command.equals("/attachment-download-failed")) {
                 enqueue(null,in.messageId(),"附件下载失败，未保存。请确认应用具有消息资源下载权限后重新发送文件。");
             } else if (command.equals("/help")) {
-                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n启用 Claude Code 时可直接发送拉取项目、修改代码等任务要求；在原话题继续回复即可续接会话。上传文件后发送文字说明，可将附件一并交给 Agent。");
+                enqueue(null, in.messageId(), "BunBird 已连接。直接发送文字即可提问；群聊无需 @机器人，每条新消息都会创建任务。\n/model 查看可用模型\n/model 模型ID 切换当前会话模型\n/model auto 恢复账号池自动选择\n/status [任务ID] 查看状态\n/cancel [任务ID] 取消自己的任务\n/help 查看帮助\n启用 Claude Code 时可直接发送拉取项目、修改代码等任务要求；在原话题继续回复即可续接会话。上传文件后发送文字说明，可将附件一并交给 Agent。");
             } else if (command.equals("/unsupported")) {
                 enqueue(null, in.messageId(), "当前支持文字和文件消息。上传文件后，请发送文字说明处理要求。");
             } else if (command.equals("/too-long")) {
@@ -134,6 +140,8 @@ public class TaskService {
         String taskId = id();
         db.update("INSERT INTO task(id,tenant_id,topic_id,sender_id,message_id,prompt,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'QUEUED',?,?)",
                 taskId, tenant, topicId, in.senderId(), in.messageId(), text, now(), now());
+        var preference=db.queryForList("SELECT account_id,model FROM session_model WHERE topic_id=? AND sender_id=?",topicId,in.senderId());
+        if(!preference.isEmpty())db.update("UPDATE task SET requested_account_id=?,requested_model=? WHERE id=?",preference.getFirst().get("account_id"),preference.getFirst().get("model"),taskId);
         db.update("UPDATE ingress SET task_id=? WHERE id=?", taskId, ingressId);
         db.update("UPDATE attachment SET task_id=? WHERE tenant_id=? AND app_id=? AND chat_id=? AND sender_id=? AND scope_key=? AND task_id IS NULL",
             taskId,tenant,appId,in.chatId(),in.senderId(),attachmentScope);
@@ -148,9 +156,41 @@ public class TaskService {
         return db.queryForList("SELECT id,topic_id,sender_id,status,model,account_id,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? ORDER BY position DESC LIMIT 100", tenant);
     }
     public Map<String, Object> task(String taskId) {
-        var rows = db.queryForList("SELECT id,tenant_id,topic_id,sender_id,message_id,prompt,status,result,error_code,model,account_id,usage_json,pause_reason,resume_at,created_at,updated_at FROM task WHERE id=? AND tenant_id=?", taskId, tenant);
+        var rows = db.queryForList("SELECT id,tenant_id,topic_id,sender_id,message_id,prompt,status,result,error_code,model,account_id,requested_account_id,requested_model,usage_json,pause_reason,resume_at,created_at,updated_at FROM task WHERE id=? AND tenant_id=?", taskId, tenant);
         if (rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND);
         return rows.getFirst();
+    }
+    private void modelCommand(Incoming in,String topicId,String argument,List<AccountPool.ModelOption> models) {
+        if(argument.equalsIgnoreCase("auto")) {
+            db.update("DELETE FROM session_model WHERE topic_id=? AND sender_id=?",topicId,in.senderId());
+            enqueue(null,in.messageId(),"已恢复账号池自动选择，从你在当前话题的下一条任务消息生效。上下文和工作区保留，当前任务不受影响。");return;
+        }
+        if(argument.isEmpty()) {
+            var preference=db.queryForList("SELECT account_id,model FROM session_model WHERE topic_id=? AND sender_id=?",topicId,in.senderId());
+            String current=preference.isEmpty()?"账号池自动选择":preference.getFirst().get("model").toString();
+            if(!preference.isEmpty()) {
+                String selectedAccount=(String)preference.getFirst().get("account_id");
+                current=models.stream().filter(m->m.accountId().equals(selectedAccount)).map(AccountPool.ModelOption::accountName).findFirst().orElse(selectedAccount)+" / "+current;
+            }
+            var reply=new StringBuilder("当前会话模型：").append(current).append("\n可选渠道与模型（已配置模型及渠道查询结果，实际可用性以调用为准）：\n");
+            for(var model:models) {
+                String selector=models.stream().filter(m->m.model().equals(model.model())).count()==1?model.model():model.selector();
+                String line="• "+model.accountName()+" · /model "+selector+"\n";
+                if(reply.length()+line.length()>9000){reply.append("其余模型请在看板查看。\n");break;}
+                reply.append(line);
+            }
+            if(models.isEmpty())reply.append("暂无已启用且配置完整的账号，请先在看板配置。\n");
+            reply.append("发送 /model 模型ID 切换；重名时使用上面的完整命令。/model auto 恢复自动选择。选择仅影响你在当前话题的后续任务。");
+            enqueue(null,in.messageId(),reply.toString());return;
+        }
+        var matches=models.stream().filter(m->m.model().equals(argument)||m.selector().equals(argument)).toList();
+        if(matches.size()!=1) {
+            enqueue(null,in.messageId(),matches.isEmpty()?"未找到该模型，请发送 /model 查看列表；查询失败的渠道可先在看板配置模型。":"多个渠道提供该模型，请发送 /model 查看并使用包含渠道标识的完整命令。");return;
+        }
+        var selected=matches.getFirst();
+        db.update("DELETE FROM session_model WHERE topic_id=? AND sender_id=?",topicId,in.senderId());
+        db.update("INSERT INTO session_model(topic_id,sender_id,account_id,model) VALUES(?,?,?,?)",topicId,in.senderId(),selected.accountId(),selected.model());
+        enqueue(null,in.messageId(),"已选择 "+selected.accountName()+" / "+selected.model()+"，从你在当前话题的下一条任务消息生效。上下文和工作区保留，当前任务不受影响。账号不可用时会尝试备用渠道并告知实际模型。");
     }
     public List<Map<String, Object>> events(String taskId, long after) {
         task(taskId);
@@ -317,6 +357,8 @@ public class TaskService {
             String previous=Objects.toString(row.get("account_id"),"");
             db.update("UPDATE task SET account_id=?,updated_at=? WHERE id=?",next,now(),taskId);
             event(taskId,previous.isEmpty()?"ACCOUNT_SELECTED":"ACCOUNT_SWITCHED",previous.isEmpty()?next:previous+" → "+next);
+            if(!previous.isEmpty() || (row.get("requested_account_id")!=null && !next.equals(row.get("requested_account_id"))))
+                enqueue(taskId,(String)row.get("message_id"),"原选账号暂不可用，本轮已切换至 "+account.get("name")+" / "+account.get("model")+"。会话上下文和工作区继续保留。");
         }
         var selected=new LinkedHashMap<>(account);
         int offset=0;

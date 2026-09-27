@@ -92,7 +92,14 @@ def test_account_errors_allow_resume_with_new_credentials(tmp_path, monkeypatch,
 
     async def scenario():
         for key in ("first-key", "backup-key"):
-            agent = ClaudeAgent(ModelConfig("anthropic", "test", "https://test", key))
+            agent = ClaudeAgent(
+                ModelConfig(
+                    "anthropic",
+                    "first-model" if key == "first-key" else "backup-model",
+                    "https://test",
+                    key,
+                )
+            )
             monkeypatch.setattr(agent, "workspace", lambda folder, *_: folder)
             with pytest.raises(ModelError, match=expected):
                 await agent.answer_with_progress(job(accountRetry=key == "backup-key"), progress)
@@ -101,6 +108,8 @@ def test_account_errors_allow_resume_with_new_credentials(tmp_path, monkeypatch,
     asyncio.run(scenario())
     assert "--session-id" in commands[0] and "--resume" in commands[1]
     assert commands[0][-1] == commands[1][-1]
+    assert commands[0][commands[0].index("--model") + 1] == "first-model"
+    assert commands[1][commands[1].index("--model") + 1] == "backup-model"
     assert environments[0]["ANTHROPIC_API_KEY"] == "first-key"
     assert environments[1]["ANTHROPIC_API_KEY"] == "backup-key"
     assert environments[0]["CLAUDE_CONFIG_DIR"] == environments[1]["CLAUDE_CONFIG_DIR"]

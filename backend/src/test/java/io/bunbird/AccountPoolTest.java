@@ -63,6 +63,15 @@ class AccountPoolTest {
         pool.failure("primary","ACCOUNT_AUTH");
         assertThat(pool.admission().state()).isEqualTo("BLOCK");
     }
+    @Test void preferredModelOverridesDefaultButFallbackUsesItsOwnModel() throws Exception {
+        var pool=pool(true);
+        assertThat(pool.select(List.of(),"backup","chosen-model")).containsEntry("id","backup").containsEntry("model","chosen-model");
+        pool.failure("backup","ACCOUNT_QUOTA");
+        assertThat(pool.select(List.of(),"backup","chosen-model")).containsEntry("id","primary").containsEntry("model","model");
+        assertThat(pool(true).select(List.of("backup"),"backup","chosen-model")).containsEntry("id","primary").containsEntry("model","model");
+        pool.change("primary","disable");
+        assertThat(pool.select(List.of(),"backup","chosen-model")).isEmpty();
+    }
     @Test void freshExhaustionBlocksAndUnknownDoesNotPretendRecovery() {
         var quota=org.mockito.Mockito.mock(QuotaService.class);
         var env=new MockEnvironment().withProperty("MODEL_MODE","anthropic")

@@ -34,7 +34,7 @@ class TaskServiceTest {
 
     @BeforeEach void clear() {
         org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","UNSUPPORTED"));
-        for (String table : List.of("managed_account","account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
+        for (String table : List.of("session_model","managed_account","account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
     }
     Incoming message(String event, String user, String topic, String text) {
         return new Incoming("tenant-test","cli-test",event,"om-"+event,"chat-test",user,topic,text,"group");
@@ -384,6 +384,48 @@ class TaskServiceTest {
         service.stopped(oldId,(String)old.get("leaseToken"));
         assertThat(service.claim()).isNotEmpty();
         assertThat(service.claim()).isEmpty();
+    }
+    @Test void modelChoiceIsScopedAndSnapshottedWithoutInterruptingCurrentTask() {
+        var choices=List.of(new AccountPool.ModelOption("deepseek","DeepSeek","deepseek-flash"),new AccountPool.ModelOption("deepseek","DeepSeek","deepseek-v4-pro"));
+        String first=submit("before","user","topic","hello");
+        var job=service.claim();
+        service.receive(message("choose","user","topic","/model deepseek-v4-pro"),choices);
+        assertThat(service.task(first).get("status")).isEqualTo("RUNNING");
+        assertThat(service.task(first).get("requested_model")).isNull();
+        String other=submit("other","another","topic","other user");
+        String otherTopic=submit("other-topic","user","different-topic","other topic");
+        assertThat(service.task(other).get("requested_model")).isNull();
+        assertThat(service.task(otherTopic).get("requested_model")).isNull();
+        String next=submit("next","user","topic","continue");
+        assertThat(service.task(next)).containsEntry("requested_account_id","deepseek").containsEntry("requested_model","deepseek-v4-pro");
+        assertThat(service.task(next).get("topic_id")).isEqualTo(job.get("topicId"));
+        service.receive(message("reset","user","topic","/model auto"),choices);
+        assertThat(service.task(next).get("requested_model")).isEqualTo("deepseek-v4-pro");
+        String auto=submit("auto","user","topic","automatic");
+        assertThat(service.task(auto).get("requested_model")).isNull();
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM session_model",Integer.class)).isZero();
+    }
+    @Test void ambiguousOrUnknownModelsLeavePreferenceUntouchedAndCommandsCreateNoTasks() {
+        var choices=List.of(new AccountPool.ModelOption("one","One","model"),new AccountPool.ModelOption("two","Two","model"));
+        service.receive(message("choose","user","topic","/model one:model"),choices);
+        service.receive(message("ambiguous","user","topic","/model model"),choices);
+        service.receive(message("unknown","user","topic","/model invented"),choices);
+        service.receive(message("list","user","topic","/model"),choices);
+        assertThat(db.queryForObject("SELECT account_id FROM session_model",String.class)).isEqualTo("one");
+        assertThat(service.tasks()).isEmpty();
+        String reply=db.queryForObject("SELECT content FROM delivery WHERE reply_to='om-list'",String.class);
+        assertThat(reply).contains("/model one:model","/model two:model");
+    }
+    @Test void fallbackNotificationNamesActualChannelAndModelOnce() {
+        var choices=List.of(new AccountPool.ModelOption("preferred","Preferred","chosen-model"));
+        service.receive(message("choose","user","topic","/model chosen-model"),choices);
+        String task=submit("task","user","topic","hello");
+        var job=service.claim();
+        var backup=Map.<String,Object>of("id","backup","name","Backup","model","backup-model");
+        service.assignAccount(task,(String)job.get("leaseToken"),backup,QuotaAdmission.allow());
+        service.assignAccount(task,(String)job.get("leaseToken"),backup,QuotaAdmission.allow());
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM delivery WHERE task_id=? AND content LIKE '%Backup / backup-model%'",Integer.class,task)).isEqualTo(1);
+        assertThat(service.task(task).get("requested_model")).isEqualTo("chosen-model");
     }
 
     @Test void accountSelectionIsLeaseBoundAndAllFailedTasksWait() throws Exception {

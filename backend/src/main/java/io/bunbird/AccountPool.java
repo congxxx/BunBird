@@ -33,6 +33,31 @@ public class AccountPool {
     private final Map<String,String> originalSecrets=new HashMap<>(), secrets=new HashMap<>();
     private final Map<String,Integer> priorities=new HashMap<>();
     private List<Map<String,Object>> previousRows=List.of();
+    private final java.util.concurrent.ConcurrentMap<String,CatalogEntry> modelCatalog=new java.util.concurrent.ConcurrentHashMap<>();
+    private record CatalogEntry(Profile profile,String secret,List<String> models,long expires) {}
+    public record ModelOption(String accountId,String accountName,String model) {
+        String selector() { return accountId+":"+model; }
+    }
+    public List<ModelOption> modelOptions() {
+        var view=view();
+        var futures=view.profiles().stream().filter(p->p.enabled() && !view.missing().contains(p.id()))
+            .filter(p->db.queryForObject("SELECT COUNT(*) FROM account_state WHERE id=? AND disabled=TRUE",Integer.class,p.id())==0)
+            .map(p->java.util.concurrent.CompletableFuture.supplyAsync(()->{
+                String secret=view.secrets().get(p.id());
+                var cached=modelCatalog.get(p.id());
+                if(cached==null || !cached.profile().equals(p) || !cached.secret().equals(secret) || cached.expires()<System.currentTimeMillis()) {
+                    List<String> discovered=List.of();
+                    try { if(!p.mode().equals("mock"))discovered=new ModelDiscovery(json).fetch(p.baseUrl(),secret,p.mode()); }
+                    catch(ResponseStatusException ignored) {}
+                    cached=new CatalogEntry(p,secret,discovered,System.currentTimeMillis()+60_000);
+                    modelCatalog.put(p.id(),cached);
+                }
+                var models=new LinkedHashSet<String>();models.add(p.model());models.addAll(p.modelMapping().values());models.addAll(cached.models());
+                return models.stream().limit(50).map(model->new ModelOption(p.id(),p.name(),model)).toList();
+            }).completeOnTimeout(java.util.stream.Stream.concat(java.util.stream.Stream.of(p.model()),p.modelMapping().values().stream())
+                .distinct().map(model->new ModelOption(p.id(),p.name(),model)).toList(),3,java.util.concurrent.TimeUnit.SECONDS)).toList();
+        return futures.stream().flatMap(f->f.join().stream()).toList();
+    }
 
     public AccountPool(Environment env,ObjectMapper json,JdbcTemplate db,QuotaService defaultQuota) {
         this.db=db; this.json=json; this.vault=new AccountVault(env);
@@ -144,10 +169,20 @@ public class AccountPool {
         return unknown?QuotaAdmission.unknown():new QuotaAdmission("BLOCK","ACCOUNT_POOL_UNAVAILABLE",reset);
     }
     public Map<String,Object> select(List<String> excluded) {
+        return select(excluded,null,null);
+    }
+    public Map<String,Object> select(List<String> excluded,String requestedAccount,String requestedModel) {
         var view=view();warm(view);
+        if(requestedAccount!=null && requestedModel!=null && !excluded.contains(requestedAccount)) {
+            var preferred=view.profiles().stream().filter(p->p.id().equals(requestedAccount)).findFirst().orElse(null);
+            if(preferred!=null) {
+                var mapped=new Profile(preferred.id(),preferred.name(),preferred.mode(),requestedModel,preferred.baseUrl(),preferred.keyEnv(),preferred.executor(),preferred.enabled(),preferred.modelMapping());
+                if(!admission(mapped,view).state().equals("BLOCK"))return selected(mapped,view);
+            }
+        }
         Profile unknown=null;
         for(var p:view.profiles()) {
-            if(excluded.contains(p.id())) continue;
+            if(excluded.contains(p.id()) || p.id().equals(requestedAccount)) continue;
             var a=admission(p,view);
             if(a.state().equals("ALLOW")) return selected(p,view);
             if(a.state().equals("UNKNOWN") && unknown==null) unknown=p;

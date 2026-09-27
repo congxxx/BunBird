@@ -16,7 +16,10 @@ public class Api {
     }
     @GetMapping("/health") public Map<String, String> health() { return Map.of("status", "ok", "service", "bunbird-control"); }
     @PostMapping("/internal/bridge/events") public Map<String, Object> receive(@Valid @RequestBody Incoming incoming) {
-        try { return tasks.receive(incoming); }
+        tasks.requireIdentity(incoming);
+        var words=incoming.text().strip().split("\\s+",2);
+        var models=incoming.attachment()==null && words[0].equalsIgnoreCase("/model") && !(words.length==2 && words[1].equalsIgnoreCase("auto"))?accounts.modelOptions():List.<AccountPool.ModelOption>of();
+        try { return tasks.receive(incoming,models); }
         catch (DuplicateKeyException duplicate) { return tasks.duplicate(incoming); }
     }
     @GetMapping("/api/tasks") public Object list() { return tasks.tasks(); }
@@ -35,7 +38,8 @@ public class Api {
     @PostMapping("/internal/worker/tasks/{id}/account") public Object selectAccount(@PathVariable String id,@Valid @RequestBody SelectAccount body,jakarta.servlet.http.HttpServletResponse response) {
         response.setHeader("Cache-Control","no-store");
         tasks.accountFailure(id,body.leaseToken(),body.failedAccount(),body.errorCode(),accounts);
-        var selected=accounts.select(body.excluded());
+        var task=tasks.task(id);
+        var selected=accounts.select(body.excluded(),(String)task.get("requested_account_id"),(String)task.get("requested_model"));
         return tasks.assignAccount(id,body.leaseToken(),selected,accounts.admission());
     }
     @GetMapping("/api/accounts") public Object accounts() { return accounts.snapshot(); }
