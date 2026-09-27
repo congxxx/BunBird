@@ -1,5 +1,15 @@
 # Claude Code 接入飞书
 
+## 看板中的模型选择与映射
+
+在「账号与渠道 → 编辑 / 添加账号」填写接口地址和密钥，点击「获取可用模型」。编辑已保存的账号会自动查询，密钥留空时由后端使用加密保存的原密钥。修改接口地址后必须重新填写密钥，查询不跟随重定向；模型列表不会写入配置，渠道不支持查询时仍可手动填写模型 ID。
+
+选择「默认会话模型」后，可分别指定 Haiku、Sonnet、Opus、Fable 的模型 ID。映射通过 `ANTHROPIC_DEFAULT_*_MODEL` 传给每次启动的 Claude Code，留空项沿用默认会话模型；`--model` 与 `ANTHROPIC_MODEL` 使用默认会话模型。映射保存在账号中，下一次执行或账号切换时生效，不改变正在执行的进程，也不修改本机全局 Claude Code 配置。映射用于 Claude Code 的模型别名，并不等于按任务类型自动选择模型。
+
+DeepSeek 的 Anthropic 接口地址为 `https://api.deepseek.com/anthropic`，模型列表使用同域的 `/models`。通用渠道会尝试 `/v1/models`、`/models`，对于 Anthropic 兼容路径会尝试去掉已知后缀后的同域列表接口，仅在 404/405 时继续尝试。返回列表仅说明模型存在，不保证所有模型都支持代码工具调用或图片输入。
+
+实现参考：[cc-switch 模型发现](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/model_fetch.rs)、[DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models/)、[Claude Code 模型映射](https://code.claude.com/docs/en/model-config)。
+
 设置 `AGENT_EXECUTOR=claude` 后，飞书的普通文字任务直接交给 Claude Code。它可以读取文件、编辑代码、运行命令、拉取仓库和执行检查；不再通过旧工作区流程的固定语句匹配、仓库登记或 `WORKSPACE_GIT_HOSTS` 校验。`/help`、`/status`、`/cancel` 仍由平台处理。执行器使用官方 [Claude Code 非交互 CLI](https://code.claude.com/docs/en/headless)。
 
 Worker 主机需要安装 Claude Code，并在 `.env` 中设置 `MODEL_MODE=anthropic`、`MODEL_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`。当前本机沿用 MiniMax 的 Anthropic 兼容接口和 MiniMax-M3。模型凭据由启动器传给子进程，不写入代码仓库。需要指定 CLI 路径时配置 `CLAUDE_CODE_EXECUTABLE`。修改配置后重启 Worker。

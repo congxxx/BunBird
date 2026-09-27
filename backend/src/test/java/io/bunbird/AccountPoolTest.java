@@ -19,7 +19,7 @@ class AccountPoolTest {
         db.execute("CREATE TABLE task(id VARCHAR PRIMARY KEY,tenant_id VARCHAR,account_id VARCHAR)");
         db.execute("CREATE TABLE run_event(task_id VARCHAR,type VARCHAR,detail VARCHAR,created_at BIGINT)");
         db.execute("CREATE TABLE account_state(id VARCHAR PRIMARY KEY,reason VARCHAR,retry_at BIGINT DEFAULT 0,disabled BOOLEAN DEFAULT FALSE,failures INT DEFAULT 0,updated_at BIGINT)");
-        db.execute("CREATE TABLE managed_account(id VARCHAR PRIMARY KEY,name VARCHAR,mode VARCHAR,model VARCHAR,base_url VARCHAR,secret_enc VARCHAR,priority INT,updated_at BIGINT)");
+        db.execute("CREATE TABLE managed_account(id VARCHAR PRIMARY KEY,name VARCHAR,mode VARCHAR,model VARCHAR,base_url VARCHAR,secret_enc VARCHAR,priority INT,updated_at BIGINT,model_mapping VARCHAR DEFAULT '{}')");
         db.execute("CREATE TABLE account_catalog_guard(id INT PRIMARY KEY)");
         db.execute("INSERT INTO account_catalog_guard VALUES(1)");
     }
@@ -95,5 +95,22 @@ class AccountPoolTest {
             .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
         assertThatThrownBy(()->pool.save(null,new AccountPool.Edit("bad","compatible","model","https://other.test", "key",1)))
             .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
+    @Test void mappingsSurviveRestartAndSelectionWithoutLeakingKeys() throws Exception {
+        var pool=pool(true);
+        var mapping=Map.of("haiku","fast","sonnet","balanced","opus","reasoning","fable","reasoning");
+        String id=(String)pool.save(null,new AccountPool.Edit("Mapped","anthropic","balanced","https://custom.test","secret",100,mapping)).get("id");
+        assertThat(pool(true).select(List.of("primary","backup"))).containsEntry("modelMapping",mapping);
+        pool.save(id,new AccountPool.Edit("Rename","anthropic","balanced","https://custom.test","",100));
+        assertThat(pool.select(List.of("primary","backup"))).containsEntry("modelMapping",mapping);
+        assertThatThrownBy(()->pool.save(id,new AccountPool.Edit("Bad","anthropic","balanced","https://custom.test","",100,Map.of("PATH","evil"))))
+            .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        pool.save(id,new AccountPool.Edit("Clear","anthropic","balanced","https://custom.test","",100,Map.of()));
+        assertThat(pool.select(List.of("primary","backup"))).containsEntry("modelMapping",Map.of());
+    }
+    @Test void discoveryCannotSendStoredSecretToChangedEndpoint() throws Exception {
+        var pool=pool(true);
+        assertThatThrownBy(()->pool.discover(new AccountPool.Discovery("primary","http://127.0.0.1:1","","anthropic")))
+            .isInstanceOf(org.springframework.web.server.ResponseStatusException.class).hasMessageContaining("更换接口地址");
     }
 }

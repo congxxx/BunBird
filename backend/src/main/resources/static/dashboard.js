@@ -154,12 +154,58 @@ async function refreshAccounts() {
   finally {accountsPending=false;}
 }
 
+const modelAliases=["haiku","sonnet","opus","fable"];
+let modelDiscoveryRequest=null, modelDiscoveryVersion=0;
+function resetModelDiscovery() {
+  modelDiscoveryVersion++;modelDiscoveryRequest?.abort();modelDiscoveryRequest=null;
+  $("account-fetch-models").disabled=false;
+  $("account-model-options").replaceChildren();
+  const option=node("option","先获取模型列表");option.value="";
+  $("account-model-choice").replaceChildren(option);$("account-model-choice").disabled=true;
+  text("account-model-status","从当前渠道读取模型，也可以直接填写模型 ID。");
+}
+async function discoverAccountModels() {
+  if(!credential||accountSaving)return;
+  resetModelDiscovery();
+  const version=modelDiscoveryVersion, loginVersion=generation;
+  const controller=new AbortController();modelDiscoveryRequest=controller;
+  const timer=setTimeout(()=>controller.abort(),30000);
+  $("account-fetch-models").disabled=true;text("account-model-status","正在获取渠道支持的模型…");
+  const payload={accountId:accountEditing?.id,baseUrl:$("account-url").value.trim(),mode:$("account-mode").value,apiKey:$("account-key").value.trim()};
+  try {
+    const request=fetch("/api/accounts/models",{method:"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:controller.signal});
+    payload.apiKey="";
+    const response=await request, data=await response.json();
+    if(version!==modelDiscoveryVersion||loginVersion!==generation)return;
+    if(!response.ok)throw new Error(response.status===401?"登录凭据已失效，请重新连接。":data.message||"无法获取模型列表，请检查配置或手动填写模型 ID。");
+    const placeholder=node("option","选择一个模型用于默认会话");placeholder.value="";
+    $("account-model-choice").replaceChildren(placeholder);
+    for(const id of data.models) {
+      const choice=node("option",id);choice.value=id;$("account-model-choice").append(choice);
+      const suggestion=node("option");suggestion.value=id;$("account-model-options").append(suggestion);
+    }
+    $("account-model-choice").disabled=!data.models.length;
+    $("account-model-choice").value=data.models.includes($("account-model").value)?$("account-model").value:"";
+    text("account-model-status",data.models.length?`已获取 ${data.models.length} 个模型。映射输入框也可从列表选择；模型列表不代表工具或图片能力均兼容。`:"渠道返回了空列表，请手动填写模型 ID。");
+  } catch(error) {
+    if(version===modelDiscoveryVersion&&loginVersion===generation)text("account-model-status",error.name==="AbortError"?"获取超时，可重试或手动填写模型 ID。":error.message);
+  } finally {
+    clearTimeout(timer);payload.apiKey="";
+    if(version===modelDiscoveryVersion){modelDiscoveryRequest=null;$("account-fetch-models").disabled=false;}
+  }
+}
+$("account-fetch-models").addEventListener("click",discoverAccountModels);
+$("account-model-choice").addEventListener("change",()=>{if($("account-model-choice").value)$("account-model").value=$("account-model-choice").value;});
+for(const id of ["account-url","account-mode","account-key"])$(id).addEventListener("input",resetModelDiscovery);
 function closeAccountForm() {
+  resetModelDiscovery();
   $("account-key").value="";$("account-form").hidden=true;accountEditing=null;
 }
 function openAccountForm(account=null) {
   if(accountSaving)return;
+  navigationTarget=$("accounts");selectNavigation("accounts");
   accountEditing=account;
+  resetModelDiscovery();
   $("account-form").reset();$("account-form").hidden=false;$("account-form-error").hidden=true;$("account-saved").hidden=true;
   text("account-form-title",account?"编辑账号":"添加账号");
   $("account-name").value=account?.name||"";
@@ -168,22 +214,26 @@ function openAccountForm(account=null) {
   $("account-url").value=account?.baseUrl||"https://api.minimaxi.com/anthropic";
   $("account-model").value=account?.model==="mock-demo"?"":account?.model||"MiniMax-M3";
   $("account-priority").value=account?.priority??100;
+  $("account-mapping").hidden=accountExecutor!=="claude";
+  modelAliases.forEach(alias=>{$(`account-model-${alias}`).value=account?.modelMapping?.[alias]||"";});
   $("account-key").required=!account?.hasKey;
   $("account-key").placeholder=account?.hasKey?"已配置；留空保留原密钥":"粘贴 API 密钥";
   text("account-form-note",`${accountExecutor==="claude"?"当前代码助手需要 Anthropic 兼容接口。":""}优先级数字越小越优先。${account?"密钥留空保留原值；更换接口地址时请重新填写密钥。":""}`);
   $("account-name").focus();$("account-form").scrollIntoView({block:"nearest",behavior:"smooth"});
+  if(account?.hasKey)discoverAccountModels();
 }
 $("account-add").addEventListener("click",()=>openAccountForm());
 $("account-cancel").addEventListener("click",closeAccountForm);
 $("logout").addEventListener("click",closeAccountForm);
 $("account-form").addEventListener("submit",async event=>{
   event.preventDefault();if(accountSaving||!credential)return;
-  const payload={name:$("account-name").value.trim(),mode:$("account-mode").value,model:$("account-model").value.trim(),baseUrl:$("account-url").value.trim(),apiKey:$("account-key").value.trim(),priority:Number($("account-priority").value)};
+  const payload={name:$("account-name").value.trim(),mode:$("account-mode").value,model:$("account-model").value.trim(),baseUrl:$("account-url").value.trim(),apiKey:$("account-key").value.trim(),priority:Number($("account-priority").value),modelMapping:Object.fromEntries(modelAliases.map(alias=>[alias,$(`account-model-${alias}`).value.trim()]))};
   const id=accountEditing?.id,version=generation;
   if(accountEditing&&payload.baseUrl.replace(/\/+$/,"")!==accountEditing.baseUrl.replace(/\/+$/,"")&&!payload.apiKey) {
     text("account-form-error","更换接口地址时，请重新填写 API 密钥。");$("account-form-error").hidden=false;return;
   }
   accountSaving=true;$("account-save").disabled=true;$("account-cancel").disabled=true;$("account-key").value="";
+  resetModelDiscovery();
   try {
     const request=fetch(id?`/api/accounts/${encodeURIComponent(id)}`:"/api/accounts",{method:id?"PUT":"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
     payload.apiKey="";

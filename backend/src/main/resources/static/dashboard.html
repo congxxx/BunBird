@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BunBird · 用量看板</title><link rel="stylesheet" href="/dashboard.css"><script src="/dashboard.js?v=20260927-nav" defer></script></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BunBird · 用量看板</title><link rel="stylesheet" href="/dashboard.css?v=20260927-models"><script src="/dashboard.js?v=20260927-models" defer></script></head>
 <body><aside><a class="brand" href="/dashboard.html"><span class="logo">B</span> BunBird</a><p class="eyebrow">工作空间</p><a class="nav active" href="#overview">◫　用量概览</a><a class="nav" href="#accounts">◉　账号与渠道</a><a class="nav" href="#tasks">☷　任务记录</a><div class="aside-foot">飞书里的代码助手<br><small>用量 · 会话 · 执行</small></div></aside>
 <main><header><div><p class="eyebrow">BUNBIRD / OBSERVABILITY</p><h1>每一次执行，都有迹可循。</h1><p class="muted">查看任务消耗与模型状态，掌握你的 Agent 工作情况。</p></div><span id="connection" class="pill">尚未连接</span></header>
 <form id="login" class="panel login"><div><h2>连接管理服务</h2><p class="muted">输入本机配置中的 BUNBIRD_ADMIN_TOKEN。凭据仅在当前页面内存中使用。</p></div><label class="sr" for="token">管理员凭据</label><input id="token" type="password" autocomplete="off" placeholder="管理员凭据" required><button>连接看板</button></form>
@@ -14,9 +14,17 @@
 <label>账号名称<input id="account-name" maxlength="80" required placeholder="例如：MiniMax 备用账号"></label>
 <label>接口协议<select id="account-mode"><option value="anthropic">Anthropic 兼容</option><option value="compatible">OpenAI Chat Completions 兼容</option></select></label>
 <label class="wide">接口地址<input id="account-url" type="url" maxlength="1024" required placeholder="https://api.minimaxi.com/anthropic"></label>
-<label>模型名称<input id="account-model" maxlength="128" required placeholder="例如：MiniMax-M3"></label>
+<label>默认会话模型<input id="account-model" list="account-model-options" maxlength="128" required placeholder="选择或填写模型 ID"></label>
 <label>优先级<input id="account-priority" type="number" min="0" max="10000" value="100" required></label>
 <label class="wide">API 密钥<input id="account-key" type="password" maxlength="8192" autocomplete="new-password" required placeholder="粘贴 API 密钥"></label>
+<div class="wide model-discovery"><button id="account-fetch-models" type="button" class="secondary">获取可用模型</button><label>选择默认模型<select id="account-model-choice" aria-label="选择默认模型" disabled><option value="">先获取模型列表</option></select></label><p id="account-model-status" class="note" role="status">从当前渠道读取模型，也可以直接填写模型 ID。</p></div>
+<datalist id="account-model-options"></datalist>
+<fieldset id="account-mapping" class="wide"><legend>Claude Code 模型映射</legend><p class="note">当 Claude Code 使用对应模型别名时，调用这里配置的渠道模型。留空沿用默认会话模型；所有映射使用本账号的接口和密钥。</p><div class="account-fields">
+<label>Haiku<input id="account-model-haiku" list="account-model-options" maxlength="128" placeholder="沿用默认会话模型"></label>
+<label>Sonnet<input id="account-model-sonnet" list="account-model-options" maxlength="128" placeholder="沿用默认会话模型"></label>
+<label>Opus<input id="account-model-opus" list="account-model-options" maxlength="128" placeholder="沿用默认会话模型"></label>
+<label>Fable<input id="account-model-fable" list="account-model-options" maxlength="128" placeholder="沿用默认会话模型"></label>
+</div></fieldset>
 </div><p id="account-form-error" class="form-error" role="alert" hidden></p>
 <div class="controls"><button id="account-save" type="submit">保存账号</button><button id="account-cancel" type="button" class="secondary">取消</button></div>
 </form><p id="account-saved" class="note" role="status" hidden></p><div id="account-list"></div><div id="quota" class="panel quota-panel"><h2>套餐额度</h2><p class="muted">登录后查询官方套餐额度。</p></div><p class="note">MiniMax 渠道支持官方 Token Plan 查询，每分钟最多更新一次。仅显示接口实际返回的窗口、剩余比例和重置时间；套餐档位及费用未返回时不作推算。</p></section>

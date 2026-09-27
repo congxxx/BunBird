@@ -14,9 +14,12 @@ import static org.springframework.http.HttpStatus.*;
 @Service
 public class AccountPool {
     record Profile(String id,String name,String mode,String model,String baseUrl,String keyEnv,
-                   String executor,boolean enabled) {
+                   String executor,boolean enabled,Map<String,String> modelMapping) {
+        Profile(String id,String name,String mode,String model,String baseUrl,String keyEnv,String executor,boolean enabled) {
+            this(id,name,mode,model,baseUrl,keyEnv,executor,enabled,Map.of());
+        }
         Map<String,Object> wire() { return Map.of("id",id,"name",name,"mode",mode,"model",model,
-            "baseUrl",baseUrl,"keyEnv",keyEnv,"executor",executor); }
+            "baseUrl",baseUrl,"keyEnv",keyEnv,"executor",executor,"modelMapping",modelMapping); }
     }
     private final List<Profile> profiles=new ArrayList<>();
     private final Map<String,QuotaService> quotas=new HashMap<>();
@@ -88,7 +91,7 @@ public class AccountPool {
         for(var row:rows) {
             String id=(String)row.get("id");
             combined.put(id,new Profile(id,(String)row.get("name"),(String)row.get("mode"),
-                (String)row.get("model"),(String)row.get("base_url"),"",executor,true));
+                (String)row.get("model"),(String)row.get("base_url"),"",executor,true,readMapping((String)row.get("model_mapping"))));
             nextSecrets.put(id,vault.decrypt((String)row.get("secret_enc")));
             nextPriorities.put(id,((Number)row.get("priority")).intValue());
         }
@@ -156,7 +159,30 @@ public class AccountPool {
         result.put("apiKey",view.secrets().get(p.id()));
         return result;
     }
-    public record Edit(String name,String mode,String model,String baseUrl,String apiKey,int priority) {
+    private Map<String,String> readMapping(String value) {
+        try { return json.readValue(value,new com.fasterxml.jackson.core.type.TypeReference<Map<String,String>>() {}); }
+        catch(Exception e) { throw new IllegalStateException("Invalid stored model mapping"); }
+    }
+    public record Discovery(String accountId,String baseUrl,String apiKey,String mode) {
+        @Override public String toString() { return "ModelDiscovery[redacted]"; }
+    }
+    public Object discover(Discovery request) {
+        String url=ModelDiscovery.normalize(request.baseUrl());
+        String key=Objects.toString(request.apiKey(),"").trim();
+        if(key.isEmpty()) {
+            var view=view();
+            var account=view.profiles().stream().filter(p->p.id().equals(request.accountId())).findFirst()
+                .orElseThrow(()->new ResponseStatusException(BAD_REQUEST,"请填写 API 密钥"));
+            if(!url.equals(ModelDiscovery.normalize(account.baseUrl())))
+                throw new ResponseStatusException(BAD_REQUEST,"更换接口地址后请重新填写密钥");
+            key=view.secrets().get(account.id());
+        }
+        return Map.of("models",new ModelDiscovery(json).fetch(url,key,request.mode()));
+    }
+    public record Edit(String name,String mode,String model,String baseUrl,String apiKey,int priority,Map<String,String> modelMapping) {
+        public Edit(String name,String mode,String model,String baseUrl,String apiKey,int priority) {
+            this(name,mode,model,baseUrl,apiKey,priority,null);
+        }
         @Override public String toString() { return "AccountEdit[redacted]"; }
     }
     @org.springframework.transaction.annotation.Transactional
@@ -187,10 +213,22 @@ public class AccountPool {
         if(key.isBlank() || key.chars().anyMatch(Character::isISOControl)) throw new ResponseStatusException(BAD_REQUEST,"Invalid key");
         if(old==null && profiles.size()>=20) throw new ResponseStatusException(CONFLICT,"Account pool is full");
         String encrypted=vault.encrypt(key);
+        var mapping=new LinkedHashMap<String,String>();
+        var supplied=edit.modelMapping()==null?(old==null?Map.<String,String>of():old.modelMapping()):edit.modelMapping();
+        for(var entry:supplied.entrySet()) {
+            String value=Objects.toString(entry.getValue(),"").trim();
+            if(!Set.of("haiku","sonnet","opus","fable").contains(entry.getKey()) || value.length()>128
+                || value.chars().anyMatch(Character::isISOControl))throw new ResponseStatusException(BAD_REQUEST,"Invalid model mapping");
+            if(!value.isBlank())mapping.put(entry.getKey(),value);
+        }
+        String mappingJson;
+        try { mappingJson=json.writeValueAsString(mapping); }
+        catch(Exception e) { throw new ResponseStatusException(BAD_REQUEST,"Invalid model mapping"); }
         int changed=db.update("UPDATE managed_account SET name=?,mode=?,model=?,base_url=?,secret_enc=?,priority=?,updated_at=? WHERE id=?",
             name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis(),id);
         if(changed==0) db.update("INSERT INTO managed_account(id,name,mode,model,base_url,secret_enc,priority,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             id,name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis());
+        db.update("UPDATE managed_account SET model_mapping=? WHERE id=?",mappingJson,id);
         // A supplied replacement key may repair authentication; admin disable stays in effect.
         if(edit.apiKey()!=null && !edit.apiKey().isBlank())
             db.update("UPDATE account_state SET reason=NULL,retry_at=0,updated_at=? WHERE id=?",System.currentTimeMillis(),id);

@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -52,6 +52,7 @@ class ModelConfig:
     name: str
     url: str
     key: str
+    model_mapping: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls):

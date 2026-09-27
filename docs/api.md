@@ -1,5 +1,7 @@
 # 最小版内部协议
 
+管理员 `POST /api/accounts/models` 接收 `{accountId?, baseUrl, mode, apiKey?}` 并返回 `{models: ["model-id"]}`。编辑账号时可不传密钥，仅当地址与已保存地址相同才会复用原密钥；错误返回经过处理的 `message`，响应禁止缓存。此接口只查询，不保存账号。账号新增/编辑及 Worker 账号选择支持 `modelMapping: {haiku?, sonnet?, opus?, fable?}`；值为渠道模型 ID。省略映射时保留原配置，传空对象时清除，空白项沿用账号的默认 `model`。V9 持久化此映射，已有账号迁移为空映射。
+
 除 `GET /health` 外，接口均要求 `Authorization: Bearer <对应密钥>`。连接器、Worker 和管理员三种密钥必须不同且至少 32 字符。来源事件仅接收配置的一个 tenant/app；内部连接器被视为可信适配器，Worker 没有来源事件写入权限。接口不提供浏览器登录，管理员密钥不得嵌入前端页面。
 
 | 身份 | 接口 | 用途 |

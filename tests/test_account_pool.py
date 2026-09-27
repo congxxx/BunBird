@@ -24,6 +24,31 @@ def test_selected_dashboard_key_takes_precedence_over_environment(monkeypatch):
     assert model.config.key == "dashboard-key"
 
 
+def test_selected_account_mapping_reaches_claude_environment(monkeypatch, tmp_path):
+    from bunbird.claude_agent import child_env
+
+    monkeypatch.setattr("bunbird.claude_agent.shutil.which", lambda _: "claude")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "unrelated-host-model")
+    profile = {
+        "apiKey": "dashboard-key",
+        "mode": "anthropic",
+        "model": "default-model",
+        "baseUrl": "https://test/anthropic",
+        "executor": "claude",
+        "modelMapping": {"haiku": "fast", "sonnet": "balanced", "opus": "reasoning"},
+    }
+    agent = AccountExecutor.build(profile)
+    env = child_env(agent.config, tmp_path)
+    assert env["ANTHROPIC_MODEL"] == "default-model"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "fast"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "balanced"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "reasoning"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "default-model"
+    profile["modelMapping"] = {}
+    backup = child_env(AccountExecutor.build(profile).config, tmp_path)
+    assert backup["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "default-model"
+
+
 @pytest.mark.parametrize(
     "code,expected", [(401, "ACCOUNT_AUTH"), (402, "ACCOUNT_QUOTA"), (429, "ACCOUNT_RATE_LIMIT")]
 )

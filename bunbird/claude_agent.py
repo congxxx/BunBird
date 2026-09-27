@@ -114,6 +114,10 @@ def child_env(config, state_dir):
         API_TIMEOUT_MS="120000",
     )
     bash = os.getenv("CLAUDE_CODE_GIT_BASH_PATH")
+    for alias in ("haiku", "sonnet", "opus", "fable"):
+        env[f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"] = (
+            config.model_mapping.get(alias) or config.name
+        )
     if bash:
         env["CLAUDE_CODE_GIT_BASH_PATH"] = bash
     return env

@@ -39,6 +39,14 @@ public class Api {
         return tasks.assignAccount(id,body.leaseToken(),selected,accounts.admission());
     }
     @GetMapping("/api/accounts") public Object accounts() { return accounts.snapshot(); }
+    @PostMapping("/api/accounts/models") public Object discoverModels(@RequestBody AccountPool.Discovery body,jakarta.servlet.http.HttpServletResponse response) {
+        response.setHeader("Cache-Control","no-store");
+        try { return accounts.discover(body); }
+        catch(org.springframework.web.server.ResponseStatusException e) {
+            response.setStatus(e.getStatusCode().value());
+            return Map.of("message",Objects.toString(e.getReason(),"模型查询失败"));
+        }
+    }
     @PostMapping("/api/accounts") public Object addAccount(@RequestBody AccountPool.Edit body) { return accounts.save(null,body); }
     @PutMapping("/api/accounts/{id}") public Object editAccount(@PathVariable String id,@RequestBody AccountPool.Edit body) { return accounts.save(id,body); }
     @PostMapping("/api/accounts/{id}/{action}") public Object accountAction(@PathVariable String id,@PathVariable String action) {

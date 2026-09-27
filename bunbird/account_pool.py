@@ -26,7 +26,13 @@ class AccountExecutor:
         key = profile.get("apiKey", os.getenv(profile.get("keyEnv", ""), ""))
         if not key and profile["mode"] != "mock":
             raise ModelError("ACCOUNT_AUTH")
-        config = ModelConfig(profile["mode"], profile["model"], profile["baseUrl"].rstrip("/"), key)
+        config = ModelConfig(
+            profile["mode"],
+            profile["model"],
+            profile["baseUrl"].rstrip("/"),
+            key,
+            profile.get("modelMapping") or {},
+        )
         return ClaudeAgent(config) if profile["executor"] == "claude" else Model(config)
 
     async def answer_with_progress(self, job, progress):
