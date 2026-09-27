@@ -5,6 +5,50 @@ const stateNames = {QUEUED:"排队中",RUNNING:"执行中",SUCCEEDED:"已完成"
 let credential = "", pending = false, generation = 0, quotaPending = false;
 function text(id, value) { $(id).textContent = value; }
 function node(tag, value, className) { const el=document.createElement(tag); if(value!=null)el.textContent=value; if(className)el.className=className; return el; }
+const navigation = [...document.querySelectorAll("aside .nav")];
+const sections = navigation.map(link => $(link.hash.slice(1)));
+let navigationTarget = null, navigationFrame = 0;
+function selectNavigation(id) {
+  navigation.forEach(link => {
+    const selected = link.hash === `#${id}`;
+    link.classList.toggle("active", selected);
+    if(selected)link.setAttribute("aria-current", "location");
+    else link.removeAttribute("aria-current");
+  });
+}
+function followNavigationHash() {
+  navigationTarget = sections.find(section => `#${section.id}` === location.hash) || sections[0];
+  selectNavigation(navigationTarget.id);
+  if(!$("content").hidden)navigationTarget.scrollIntoView({block:"start"});
+}
+function syncNavigation() {
+  if(navigationFrame)return;
+  navigationFrame = requestAnimationFrame(() => {
+    navigationFrame = 0;
+    if($("content").hidden || navigationTarget)return;
+    let current = sections[0];
+    for(const section of sections)if(section.getBoundingClientRect().top <= 80)current = section;
+    // The final section can be too short to reach the top of the viewport.
+    if(window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2)current = sections.at(-1);
+    selectNavigation(current.id);
+  });
+}
+navigation.forEach(link => link.addEventListener("click", event => {
+  if(event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)return;
+  navigationTarget = $(link.hash.slice(1));
+  selectNavigation(navigationTarget.id);
+}));
+// Keep an explicit anchor selection even when scrolling is clamped at the page bottom.
+// Resume scroll tracking when the user starts scrolling themselves.
+for(const type of ["wheel", "touchstart", "pointerdown"])window.addEventListener(type, () => {navigationTarget = null;}, {passive:true});
+window.addEventListener("keydown", event => {
+  if(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) && !event.target.closest("input,select,textarea,[contenteditable]"))navigationTarget = null;
+});
+window.addEventListener("scroll", syncNavigation, {passive:true});
+window.addEventListener("resize", syncNavigation);
+window.addEventListener("hashchange", followNavigationHash);
+new ResizeObserver(syncNavigation).observe($("content"));
+followNavigationHash();
 function render(data) {
   text("total",fmt(data.usage.total)); text("io",`${fmt(data.usage.input)} / ${fmt(data.usage.output)}`);
   text("cache",`${fmt(data.usage.cacheRead)} / ${fmt(data.usage.cacheWrite)}`);
@@ -29,7 +73,8 @@ async function refresh() {
   if(!credential||pending)return;pending=true;$("refresh").disabled=true;const version=generation;
   try { const res=await fetch(`/api/dashboard?days=${$("days").value}`,{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
     if(!res.ok)throw new Error(res.status===401?"凭据无效，请检查管理员凭据。":"管理服务暂时不可用，请稍后刷新。");
-    const data=await res.json();if(version!==generation)return;render(data);refreshAccounts();refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
+    const data=await res.json();if(version!==generation)return;const firstConnection=$("content").hidden;render(data);refreshAccounts();refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
+    if(firstConnection && location.hash)followNavigationHash();
   } catch(e) {if(version!==generation)return;text("error",e.name==="TimeoutError"?"请求超时，请检查本地服务。":e.message);$("error").hidden=false;text("connection","连接异常");$("connection").classList.remove("online");}
   finally {pending=false;$("refresh").disabled=false;}
 }
