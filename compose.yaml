@@ -34,6 +34,8 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:-}
     ports:
       - 127.0.0.1:8080:8080
+    volumes:
+      - control-secrets:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +82,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  control-secrets:
   postgres-data:
   bridge-data:
   worker-data:

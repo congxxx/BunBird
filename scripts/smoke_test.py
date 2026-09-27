@@ -117,8 +117,8 @@ def main():
                 "MODEL_NAME": "local-contract-model",
                 "MODEL_BASE_URL": f"http://127.0.0.1:{model_server.server_port}/v1",
                 "MODEL_API_KEY": "local-test-key",
-                "SMOKE_BACKUP_KEY": "local-backup-key",
                 "BUNBIRD_ACCOUNTS_FILE": str(folder / "accounts.json"),
+                "BUNBIRD_ACCOUNT_KEY_FILE": str(folder / "vault.key"),
                 "PYTHONIOENCODING": "utf-8",
                 "NO_PROXY": "127.0.0.1,localhost",
                 "WORKSPACE_ROOT": str(folder / "workspaces"),
@@ -134,10 +134,7 @@ def main():
                             "baseUrl": env["MODEL_BASE_URL"],
                             "keyEnv": key,
                         }
-                        for ident, key in (
-                            ("primary", "MODEL_API_KEY"),
-                            ("backup", "SMOKE_BACKUP_KEY"),
-                        )
+                        for ident, key in (("primary", "MODEL_API_KEY"),)
                     ]
                 ),
                 encoding="utf-8",
@@ -257,6 +254,23 @@ def main():
                     wait_for(ready)
                     restored = admin.get(f"/api/tasks/{task_id}").json()
                     assert restored["status"] == "QUEUED", restored
+                    saved = admin.post(
+                        "/api/accounts",
+                        json={
+                            "name": "Dashboard backup",
+                            "mode": "compatible",
+                            "model": "local-contract-model",
+                            "baseUrl": env["MODEL_BASE_URL"],
+                            "apiKey": "local-backup-key",
+                            "priority": 10,
+                        },
+                    )
+                    saved.raise_for_status()
+                    backup_id = saved.json()["id"]
+                    assert "local-backup-key" not in admin.get("/api/accounts").text
+                    stop(process)
+                    process = start_control()
+                    wait_for(ready)
                     worker = subprocess.Popen(
                         [sys.executable, "-m", "bunbird.cli", "worker"],
                         cwd=ROOT,
@@ -277,7 +291,7 @@ def main():
                     assert result["result"] == "跨进程测试回答"
                     assert result["model"] == "local-contract-model"
                     assert len(model_calls) == 2
-                    assert result["account_id"] == "backup"
+                    assert result["account_id"] == backup_id
                     deliveries = admin.get(f"/api/tasks/{task_id}/deliveries").json()
                     assert all(d["status"] == "SENT" for d in deliveries)
                     assert len({r.request_body.uuid for r in sent}) == 3

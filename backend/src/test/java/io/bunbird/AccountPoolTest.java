@@ -19,6 +19,9 @@ class AccountPoolTest {
         db.execute("CREATE TABLE task(id VARCHAR PRIMARY KEY,tenant_id VARCHAR,account_id VARCHAR)");
         db.execute("CREATE TABLE run_event(task_id VARCHAR,type VARCHAR,detail VARCHAR,created_at BIGINT)");
         db.execute("CREATE TABLE account_state(id VARCHAR PRIMARY KEY,reason VARCHAR,retry_at BIGINT DEFAULT 0,disabled BOOLEAN DEFAULT FALSE,failures INT DEFAULT 0,updated_at BIGINT)");
+        db.execute("CREATE TABLE managed_account(id VARCHAR PRIMARY KEY,name VARCHAR,mode VARCHAR,model VARCHAR,base_url VARCHAR,secret_enc VARCHAR,priority INT,updated_at BIGINT)");
+        db.execute("CREATE TABLE account_catalog_guard(id INT PRIMARY KEY)");
+        db.execute("INSERT INTO account_catalog_guard VALUES(1)");
     }
     AccountPool pool(boolean backupKey) throws Exception {
         var file=temp.resolve("accounts.json");
@@ -27,7 +30,8 @@ class AccountPoolTest {
              {"id":"backup","name":"Backup","mode":"anthropic","model":"model","baseUrl":"https://provider.test","keyEnv":"SECOND_KEY"}]
             """);
         var env=new MockEnvironment().withProperty("BUNBIRD_ACCOUNTS_FILE",file.toString())
-            .withProperty("FIRST_KEY","secret-first").withProperty("AGENT_EXECUTOR","claude");
+            .withProperty("FIRST_KEY","secret-first").withProperty("AGENT_EXECUTOR","claude")
+            .withProperty("BUNBIRD_ACCOUNT_KEY_FILE",temp.resolve("vault.key").toString());
         if(backupKey) env.withProperty("SECOND_KEY","secret-second");
         return new AccountPool(env,json,db,new QuotaService(()->null,java.time.Clock.systemUTC(),false));
     }
@@ -73,5 +77,23 @@ class AccountPoolTest {
         org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","AVAILABLE","windows",
             List.of(Map.of("model","general","remainingPercent",25))));
         assertThat(pool.admission().state()).isEqualTo("ALLOW");
+    }
+    @Test void dashboardCredentialsAreEncryptedLiveAndSurviveRestart() throws Exception {
+        var pool=pool(true);
+        String id=(String)pool.save(null,new AccountPool.Edit("Dashboard","anthropic","model","https://custom.test", "new-secret",0)).get("id");
+        String stored=db.queryForObject("SELECT secret_enc FROM managed_account WHERE id=?",String.class,id);
+        assertThat(stored).doesNotContain("new-secret");
+        assertThat(Files.readString(temp.resolve("vault.key"))).doesNotContain("new-secret");
+        assertThat(pool.select(List.of("primary","backup"))).containsEntry("apiKey","new-secret").containsEntry("id",id);
+        assertThat(pool.snapshot().toString()).doesNotContain("new-secret",stored);
+        pool.save(id,new AccountPool.Edit("Renamed","anthropic","model","https://custom.test", "",1));
+        assertThat(pool(true).select(List.of("primary","backup"))).containsEntry("apiKey","new-secret").containsEntry("name","Renamed");
+        pool.failure(id,"ACCOUNT_AUTH");
+        pool.save(id,new AccountPool.Edit("Renamed","anthropic","model","https://custom.test", "replacement",1));
+        assertThat(pool.select(List.of("primary","backup"))).containsEntry("apiKey","replacement");
+        assertThatThrownBy(()->pool.save(id,new AccountPool.Edit("Renamed","anthropic","model","https://other.test", "",1)))
+            .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->pool.save(null,new AccountPool.Edit("bad","compatible","model","https://other.test", "key",1)))
+            .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
     }
 }

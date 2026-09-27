@@ -1,4 +1,4 @@
-"""Lease-bound account selection. Credentials stay in the Worker's environment."""
+"""Lease-bound account selection. Selected credentials never enter task data or logs."""
 
 import os
 
@@ -23,7 +23,7 @@ class AccountExecutor:
 
     @staticmethod
     def build(profile):
-        key = os.getenv(profile["keyEnv"], "")
+        key = profile.get("apiKey", os.getenv(profile.get("keyEnv", ""), ""))
         if not key and profile["mode"] != "mock":
             raise ModelError("ACCOUNT_AUTH")
         config = ModelConfig(profile["mode"], profile["model"], profile["baseUrl"].rstrip("/"), key)

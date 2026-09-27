@@ -66,7 +66,7 @@ async function refreshQuota() {
   } finally {quotaPending=false;}
 }
 
-let accountsPending=false;
+let accountsPending=false, accountEditing=null, accountExecutor="model", accountSaving=false;
 const accountReasons={ACCOUNT_AUTH:"认证失败，请更新密钥后重置",ACCOUNT_QUOTA:"额度或余额不足",ACCOUNT_RATE_LIMIT:"服务商限流，冷却中",ACCOUNT_DISABLED:"管理员已停用",ACCOUNT_UNCONFIGURED:"未启用或缺少凭据",QUOTA_INTERVAL_EXHAUSTED:"短周期额度耗尽",QUOTA_WEEKLY_EXHAUSTED:"周额度耗尽",QUOTA_UNCONFIRMED:"额度暂未确认"};
 async function accountAction(id,action,button) {
   button.disabled=true;
@@ -83,6 +83,7 @@ async function refreshAccounts() {
     const response=await fetch("/api/accounts",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(15000)});
     if(!response.ok)throw new Error();
     const data=await response.json();if(version!==generation)return;
+    accountExecutor=data.executor;
     const list=$("account-list");list.replaceChildren(node("p",`自动切换已启用 · 已登记 ${data.configuredCount} 个账号 · 按配置顺序选择` ,"note"));
     if(data.configuredCount<2)list.append(node("p","当前只有一个账号，添加备用账号后才能实际切换。","note"));
     data.accounts.forEach(a=>{
@@ -97,7 +98,8 @@ async function refreshAccounts() {
       const toggle=node("button",a.disabled?"启用":"停用","secondary"),reset=node("button","清除冷却 / 重试认证","secondary");
       toggle.onclick=()=>accountAction(a.id,a.disabled?"enable":"disable",toggle);
       reset.onclick=()=>accountAction(a.id,"reset",reset);
-      meta.append(toggle,reset);item.append(main,meta);list.append(item);
+      const edit=node("button","编辑","secondary");edit.onclick=()=>openAccountForm(a);
+      meta.append(edit,toggle,reset);item.append(main,meta);list.append(item);
     });
     if(data.switches.length) {
       list.append(node("h3","最近自动切换"));
@@ -106,3 +108,45 @@ async function refreshAccounts() {
   } catch {if(version===generation)$("account-list").replaceChildren(node("p","账号池状态暂时不可用，请刷新重试。","note"));}
   finally {accountsPending=false;}
 }
+
+function closeAccountForm() {
+  $("account-key").value="";$("account-form").hidden=true;accountEditing=null;
+}
+function openAccountForm(account=null) {
+  if(accountSaving)return;
+  accountEditing=account;
+  $("account-form").reset();$("account-form").hidden=false;$("account-form-error").hidden=true;$("account-saved").hidden=true;
+  text("account-form-title",account?"编辑账号":"添加账号");
+  $("account-name").value=account?.name||"";
+  $("account-mode").value=account?.mode==="compatible"?"compatible":"anthropic";
+  $("account-mode").querySelector('option[value="compatible"]').disabled=accountExecutor==="claude";
+  $("account-url").value=account?.baseUrl||"https://api.minimaxi.com/anthropic";
+  $("account-model").value=account?.model==="mock-demo"?"":account?.model||"MiniMax-M3";
+  $("account-priority").value=account?.priority??100;
+  $("account-key").required=!account?.hasKey;
+  $("account-key").placeholder=account?.hasKey?"已配置；留空保留原密钥":"粘贴 API 密钥";
+  text("account-form-note",`${accountExecutor==="claude"?"当前代码助手需要 Anthropic 兼容接口。":""}优先级数字越小越优先。${account?"密钥留空保留原值；更换接口地址时请重新填写密钥。":""}`);
+  $("account-name").focus();$("account-form").scrollIntoView({block:"nearest",behavior:"smooth"});
+}
+$("account-add").addEventListener("click",()=>openAccountForm());
+$("account-cancel").addEventListener("click",closeAccountForm);
+$("logout").addEventListener("click",closeAccountForm);
+$("account-form").addEventListener("submit",async event=>{
+  event.preventDefault();if(accountSaving||!credential)return;
+  const payload={name:$("account-name").value.trim(),mode:$("account-mode").value,model:$("account-model").value.trim(),baseUrl:$("account-url").value.trim(),apiKey:$("account-key").value.trim(),priority:Number($("account-priority").value)};
+  const id=accountEditing?.id,version=generation;
+  if(accountEditing&&payload.baseUrl.replace(/\/+$/,"")!==accountEditing.baseUrl.replace(/\/+$/,"")&&!payload.apiKey) {
+    text("account-form-error","更换接口地址时，请重新填写 API 密钥。");$("account-form-error").hidden=false;return;
+  }
+  accountSaving=true;$("account-save").disabled=true;$("account-cancel").disabled=true;$("account-key").value="";
+  try {
+    const request=fetch(id?`/api/accounts/${encodeURIComponent(id)}`:"/api/accounts",{method:id?"PUT":"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
+    payload.apiKey="";
+    const response=await request;if(version!==generation)return;
+    if(!response.ok)throw new Error(response.status===401?"登录凭据已失效，请重新连接。":response.status===409?"账号池已满，最多支持 20 个账号。":"保存失败，请检查接口地址、模型和密钥是否填写完整，协议是否兼容。");
+    closeAccountForm();text("account-saved","账号已保存，将用于后续账号选择；正在执行的任务不受影响。");$("account-saved").hidden=false;
+    await refreshAccounts();
+  } catch(error) {
+    if(version===generation){text("account-form-error",error.name==="TimeoutError"?"保存请求超时，请先刷新账号列表确认是否已保存，再决定是否重试。":error.message);$("account-form-error").hidden=false;}
+  } finally {payload.apiKey="";accountSaving=false;$("account-save").disabled=false;$("account-cancel").disabled=false;}
+});

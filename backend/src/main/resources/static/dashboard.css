@@ -3,3 +3,5 @@
 .quota-panel{margin-top:16px}.quota-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:16px}.quota-window{border:1px solid #ebe7f5;border-radius:9px;padding:18px}.quota-window strong{font-size:24px;display:block}.quota-window progress{width:100%;height:10px;accent-color:#7258ce;margin-top:20px}.quota-window p{margin-top:8px}
 
 .state.WAITING_QUOTA,.quota-warning{background:#fff3d8;color:#895f13}.quota-warning{padding:9px;border-radius:6px;font-size:12px}
+
+.account-form{margin-bottom:18px}.account-fields{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}.account-fields label{display:flex;flex-direction:column;gap:8px;font-size:13px;color:#626a7c}.account-fields input,.account-fields select{width:100%;min-width:0}.account-fields .wide{grid-column:1 / -1}.form-error{color:#ac4930;background:#fff0eb;padding:12px;border-radius:8px}.account-meta button{margin:4px}.account{margin-bottom:10px}@media(max-width:700px){.account-fields{grid-template-columns:1fr}.account-fields .wide{grid-column:auto}}

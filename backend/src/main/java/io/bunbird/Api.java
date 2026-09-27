@@ -32,12 +32,15 @@ public class Api {
     public record SelectAccount(@jakarta.validation.constraints.NotBlank String leaseToken,
         @jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Size(max=20) List<String> excluded,
         String failedAccount,String errorCode) {}
-    @PostMapping("/internal/worker/tasks/{id}/account") public Object selectAccount(@PathVariable String id,@Valid @RequestBody SelectAccount body) {
+    @PostMapping("/internal/worker/tasks/{id}/account") public Object selectAccount(@PathVariable String id,@Valid @RequestBody SelectAccount body,jakarta.servlet.http.HttpServletResponse response) {
+        response.setHeader("Cache-Control","no-store");
         tasks.accountFailure(id,body.leaseToken(),body.failedAccount(),body.errorCode(),accounts);
         var selected=accounts.select(body.excluded());
         return tasks.assignAccount(id,body.leaseToken(),selected,accounts.admission());
     }
     @GetMapping("/api/accounts") public Object accounts() { return accounts.snapshot(); }
+    @PostMapping("/api/accounts") public Object addAccount(@RequestBody AccountPool.Edit body) { return accounts.save(null,body); }
+    @PutMapping("/api/accounts/{id}") public Object editAccount(@PathVariable String id,@RequestBody AccountPool.Edit body) { return accounts.save(id,body); }
     @PostMapping("/api/accounts/{id}/{action}") public Object accountAction(@PathVariable String id,@PathVariable String action) {
         accounts.change(id,action); return Map.of("accepted",true);
     }

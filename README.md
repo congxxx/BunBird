@@ -143,16 +143,18 @@ MiniMax 新任务领取前会检查官方套餐额度（复用最长 60 秒缓�
 
 ## API 账号池与自动切换
 
-Worker 现在通过管理服务为每个任务选择账号。不设置 `BUNBIRD_ACCOUNTS_FILE` 时沿用现有 `MODEL_*` 环境账号；只有一个账号时，耗尽后只能等待，无法实际切换。复制 `accounts.example.json` 到 `data/accounts.json`，在 `.env` 设置 `BUNBIRD_ACCOUNTS_FILE` 为该文件的绝对路径，将每个账号的密钥分别放入 `keyEnv` 指定的环境变量（例如 `MODEL_API_KEY`、`MINIMAX_BACKUP_API_KEY`）。配置文件只保存名称、接口地址和密钥变量名，不能内嵌密钥。修改配置或密钥后重启 Control 和 Worker；两者必须加载相同的凭据环境。
+Worker 现在通过管理服务为每个任务选择账号。推荐在看板的“账号与渠道 → 添加账号”中直接填写，保存后无需重启。编辑已有账号时密钥留空表示保留，改变接口地址需重新输入密钥。优先级数字越小越先使用；正在执行的任务仍使用原配置，下一次账号选择读取新值。不设置 `BUNBIRD_ACCOUNTS_FILE` 时沿用现有 `MODEL_*` 环境账号作为初始账号；只有一个账号时，耗尽后只能等待，无法实际切换。也可以继续使用旧配置方式：复制 `accounts.example.json` 到 `data/accounts.json`，在 `.env` 设置 `BUNBIRD_ACCOUNTS_FILE` 为该文件的绝对路径，将每个账号的密钥分别放入 `keyEnv` 指定的环境变量（例如 `MODEL_API_KEY`、`MINIMAX_BACKUP_API_KEY`）。配置文件只保存名称、接口地址和密钥变量名，不能内嵌密钥。直接修改 JSON 或环境变量后仍需重启 Control；看板保存的配置会覆盖同 ID 的旧配置。密钥由 Control 在有效任务租约内仅发送给当前 Worker，无需再次写入 Worker 环境变量。远程 Control/Worker 部署应使用 HTTPS。
 
-数组顺序即优先级，支持最多 20 个账号。`mode` 可为 `anthropic` 或 `compatible`；所有账号使用当前 `AGENT_EXECUTOR`。Claude Code 执行器要求全部账号提供 Anthropic 兼容接口；普通 model 执行器可以使用两种聊天协议。建议同一池使用相同模型，避免续接对话时服务商功能不兼容。本功能不包括 Claude／ChatGPT 订阅登录，也不按任务类型选择模型。
+旧 JSON 数组顺序决定初始优先级，看板可修改优先级；合计最多 20 个账号。`mode` 可为 `anthropic` 或 `compatible`；所有账号使用当前 `AGENT_EXECUTOR`。Claude Code 执行器要求全部账号提供 Anthropic 兼容接口；普通 model 执行器可以使用两种聊天协议。建议同一池使用相同模型，避免续接对话时服务商功能不兼容。本功能不包括 Claude／ChatGPT 订阅登录，也不按任务类型选择模型。
 
 执行前跳过已停用、缺少凭据、冷却中或官方明确报告额度耗尽的账号。已确认可用的账号优先于额度未知的账号；查询失败不能视为额度归零，已等待额度的任务只有确认可用后才继续。MiniMax 的短周期和周额度均参与判断。其他兼容服务没有统一额度查询接口，使用实际调用的认证、余额及限流错误切换，不臆造套餐剩余量。
 
-运行中收到明确账号错误时结束当前执行，再切换到本轮尚未尝试的账号；每个账号一轮只尝试一次。HTTP 401 视为认证错误，402 为余额/账单错误，429 为限流；同时识别标准错误体和 MiniMax 的 1002、1004、1008、2049、2056 错误码。限流默认冷却 60 秒，余额/套餐错误默认 300 秒后重新检查；这些是本地重试间隔，不是服务商承诺的重置时间。认证失败必须更新密钥、重启服务后在看板重置。普通网络、工具权限、输入内容或执行错误不会触发盲目换号。错误码依据 [MiniMax 官方说明](https://platform.minimax.cn/docs/api-reference/errorcode) 和 [Claude API 错误说明](https://platform.claude.com/docs/en/api/errors)。
+运行中收到明确账号错误时结束当前执行，再切换到本轮尚未尝试的账号；每个账号一轮只尝试一次。HTTP 401 视为认证错误，402 为余额/账单错误，429 为限流；同时识别标准错误体和 MiniMax 的 1002、1004、1008、2049、2056 错误码。限流默认冷却 60 秒，余额/套餐错误默认 300 秒后重新检查；这些是本地重试间隔，不是服务商承诺的重置时间。认证失败可在看板编辑并填写新密钥，保存后自动清除认证失败状态；管理员停用状态仍保留。普通网络、工具权限、输入内容或执行错误不会触发盲目换号。错误码依据 [MiniMax 官方说明](https://platform.minimax.cn/docs/api-reference/errorcode) 和 [Claude API 错误说明](https://platform.claude.com/docs/en/api/errors)。
 
 Claude Code 换号沿用原会话、附件目录和 Git 工作区，并以恢复提示要求核对已完成的操作。不会重新克隆工作区；但模型续接不提供外部操作的严格 exactly-once 保证。所有账号暂不可用时任务进入 `WAITING_QUOTA`，保留进度，定期检查后继续；新消息仍可替换等待中的任务。冷却、管理员停用和异常次数保存在数据库，服务重启不清空。
 
-看板账号区可停用/启用账号及清除冷却，显示最近 10 次切换；任务记录显示实际最终账号。管理员接口为 `GET /api/accounts`、`POST /api/accounts/{id}/enable|disable|reset`，Worker 无权调用这些管理操作。添加账号目前通过本地 JSON 和环境变量完成。密钥不会返回看板或放入 Agent 命令行；用量仍只统计服务商最终返回的计数，切换前失败的请求可能另有未上报消耗。
+看板账号区可停用/启用账号及清除冷却，显示最近 10 次切换；任务记录显示实际最终账号。管理员接口为 `GET /api/accounts`、`POST /api/accounts/{id}/enable|disable|reset`，Worker 无权调用这些管理操作。添加和编辑接口为管理员专用的 `POST /api/accounts`、`PUT /api/accounts/{id}`，查询接口只返回 `hasKey`，不会回显密钥。密钥也不会放入 Agent 命令行；用量仍只统计服务商最终返回的计数，切换前失败的请求可能另有未上报消耗。
 
-Compose 部署多个账号时，需用本地 override 将配置 JSON 只读挂载进 Control，设置容器内 `BUNBIRD_ACCOUNTS_FILE`，并给 Control 与 Worker 分别注入对应 `keyEnv` 环境变量；不要把宿主机绝对路径直接用作容器路径。基础 Compose 的默认环境账号保持兼容。
+Compose 部署多个账号时，需用本地 override 将配置 JSON 只读挂载进 Control，设置容器内 `BUNBIRD_ACCOUNTS_FILE`，并给 Control 注入对应 `keyEnv` 环境变量；不要把宿主机绝对路径直接用作容器路径。基础 Compose 的默认环境账号保持兼容。
+
+看板保存的凭据以 AES-256-GCM 加密存入数据库。加密主密钥首次保存时自动生成在 Control 的 `data/account-vault.key`，可通过 `BUNBIRD_ACCOUNT_KEY_FILE` 指定路径，或使用 `BUNBIRD_ACCOUNT_MASTER_KEY` 提供 Base64 编码的 32 字节密钥。数据库和该主密钥必须一起备份，丢失或替换主密钥会导致已有凭据无法解密；不要将其提交到 Git。Compose 使用独立 `control-secrets` 卷保留主密钥。看板账号表单、列表、任务记录和普通日志不回显凭据，浏览器不将密钥写入本地存储。

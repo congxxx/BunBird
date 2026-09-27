@@ -10,7 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 import static org.springframework.http.HttpStatus.*;
 
-/** Profiles contain environment variable names, never inline credentials. */
+/** Environment profiles and encrypted, dashboard-managed profiles share one live catalog. */
 @Service
 public class AccountPool {
     record Profile(String id,String name,String mode,String model,String baseUrl,String keyEnv,
@@ -23,12 +23,19 @@ public class AccountPool {
     private final Set<String> missing=new HashSet<>();
     private final JdbcTemplate db;
     private final String tenant;
+    private final ObjectMapper json;
+    private final AccountVault vault;
+    private final String executor;
+    private final List<Profile> originalProfiles=new ArrayList<>();
+    private final Map<String,String> originalSecrets=new HashMap<>(), secrets=new HashMap<>();
+    private final Map<String,Integer> priorities=new HashMap<>();
+    private List<Map<String,Object>> previousRows=List.of();
 
     public AccountPool(Environment env,ObjectMapper json,JdbcTemplate db,QuotaService defaultQuota) {
-        this.db=db;
+        this.db=db; this.json=json; this.vault=new AccountVault(env);
         this.tenant=env.getProperty("bunbird.tenant","");
         String file=env.getProperty("BUNBIRD_ACCOUNTS_FILE","");
-        String executor=env.getProperty("AGENT_EXECUTOR","model");
+        this.executor=env.getProperty("AGENT_EXECUTOR","model");
         if(file.isBlank()) {
             profiles.add(new Profile("environment","当前环境账号",env.getProperty("MODEL_MODE","mock"),
                 env.getProperty("MODEL_NAME","mock-demo"),env.getProperty("MODEL_BASE_URL",""),
@@ -64,16 +71,54 @@ public class AccountPool {
             }
         } catch(Exception e) { throw new IllegalArgumentException("Invalid account pool configuration; check profile fields (no inline keys)"); }
         for(var p:profiles) {
+            originalSecrets.put(p.id(),env.getProperty(p.keyEnv(),""));
+            priorities.put(p.id(),priorities.size()*10);
             if(!p.mode().equals("mock") && env.getProperty(p.keyEnv(),"").isBlank()) missing.add(p.id());
         }
+        originalProfiles.addAll(profiles);secrets.putAll(originalSecrets);
+    }
+
+    private synchronized void refresh() {
+        var rows=db.queryForList("SELECT * FROM managed_account ORDER BY priority,id");
+        if(rows.equals(previousRows)) return;
+        var combined=new LinkedHashMap<String,Profile>();
+        var nextSecrets=new HashMap<>(originalSecrets);
+        var nextPriorities=new HashMap<String,Integer>();
+        for(var p:originalProfiles) { combined.put(p.id(),p);nextPriorities.put(p.id(),nextPriorities.size()*10); }
+        for(var row:rows) {
+            String id=(String)row.get("id");
+            combined.put(id,new Profile(id,(String)row.get("name"),(String)row.get("mode"),
+                (String)row.get("model"),(String)row.get("base_url"),"",executor,true));
+            nextSecrets.put(id,vault.decrypt((String)row.get("secret_enc")));
+            nextPriorities.put(id,((Number)row.get("priority")).intValue());
+        }
+        for(var p:combined.values()) {
+            var old=profiles.stream().filter(q->q.id().equals(p.id())).findFirst().orElse(null);
+            if(!p.equals(old) || !Objects.equals(nextSecrets.get(p.id()),secrets.get(p.id())))
+                quotas.put(p.id(),new QuotaService(json,p.baseUrl(),nextSecrets.get(p.id())));
+        }
+        profiles.clear();profiles.addAll(combined.values());
+        profiles.sort(Comparator.comparingInt(p->nextPriorities.get(p.id())));
+        secrets.clear();secrets.putAll(nextSecrets);
+        priorities.clear();priorities.putAll(nextPriorities);
+        missing.clear();for(var p:profiles) if(!p.mode().equals("mock") && secrets.get(p.id()).isBlank()) missing.add(p.id());
+        previousRows=rows;
+    }
+
+    private record View(List<Profile> profiles,Map<String,String> secrets,Map<String,QuotaService> quotas,
+                        Map<String,Integer> priorities,Set<String> missing) {}
+    private synchronized View view() {
+        refresh();
+        return new View(List.copyOf(profiles),Map.copyOf(secrets),Map.copyOf(quotas),
+            Map.copyOf(priorities),Set.copyOf(missing));
     }
 
     Profile profile(String id) {
         return profiles.stream().filter(p->p.id().equals(id)).findFirst()
             .orElseThrow(()->new ResponseStatusException(BAD_REQUEST,"Unknown account"));
     }
-    QuotaAdmission admission(Profile p) {
-        if(!p.enabled() || missing.contains(p.id())) return new QuotaAdmission("BLOCK","ACCOUNT_UNCONFIGURED",null);
+    QuotaAdmission admission(Profile p,View view) {
+        if(!p.enabled() || view.missing().contains(p.id())) return new QuotaAdmission("BLOCK","ACCOUNT_UNCONFIGURED",null);
         var rows=db.queryForList("SELECT * FROM account_state WHERE id=?",p.id());
         if(!rows.isEmpty()) {
             var row=rows.getFirst();
@@ -82,13 +127,13 @@ public class AccountPool {
             long retry=((Number)row.get("retry_at")).longValue();
             if(retry>System.currentTimeMillis()) return new QuotaAdmission("BLOCK",(String)row.get("reason"),retry);
         }
-        return QuotaAdmission.from(quotas.get(p.id()).get(),p.model(),System.currentTimeMillis());
+        return QuotaAdmission.from(view.quotas().get(p.id()).get(),p.model(),System.currentTimeMillis());
     }
     public QuotaAdmission admission() {
-        warm();
+        var view=view();warm(view);
         boolean unknown=false; Long reset=null;
-        for(var p:profiles) {
-            var a=admission(p);
+        for(var p:view.profiles()) {
+            var a=admission(p,view);
             if(a.state().equals("ALLOW")) return a;
             unknown|=a.state().equals("UNKNOWN");
             if(a.resumeAt()!=null) reset=reset==null?a.resumeAt():Math.min(reset,a.resumeAt());
@@ -96,17 +141,63 @@ public class AccountPool {
         return unknown?QuotaAdmission.unknown():new QuotaAdmission("BLOCK","ACCOUNT_POOL_UNAVAILABLE",reset);
     }
     public Map<String,Object> select(List<String> excluded) {
-        warm();
+        var view=view();warm(view);
         Profile unknown=null;
-        for(var p:profiles) {
+        for(var p:view.profiles()) {
             if(excluded.contains(p.id())) continue;
-            var a=admission(p);
-            if(a.state().equals("ALLOW")) return p.wire();
+            var a=admission(p,view);
+            if(a.state().equals("ALLOW")) return selected(p,view);
             if(a.state().equals("UNKNOWN") && unknown==null) unknown=p;
         }
-        return unknown==null?Map.of():unknown.wire();
+        return unknown==null?Map.of():selected(unknown,view);
+    }
+    private Map<String,Object> selected(Profile p,View view) {
+        var result=new LinkedHashMap<>(p.wire());
+        result.put("apiKey",view.secrets().get(p.id()));
+        return result;
+    }
+    public record Edit(String name,String mode,String model,String baseUrl,String apiKey,int priority) {
+        @Override public String toString() { return "AccountEdit[redacted]"; }
+    }
+    @org.springframework.transaction.annotation.Transactional
+    public synchronized Map<String,Object> save(String requestedId,Edit edit) {
+        // Serialize edits across Control instances, including the maximum account count.
+        db.queryForList("SELECT id FROM account_catalog_guard WHERE id=1 FOR UPDATE");
+        refresh();
+        String id=requestedId==null?"account-"+UUID.randomUUID():requestedId;
+        Profile old=requestedId==null?null:profile(id);
+        String name=Objects.toString(edit.name(),"").trim(),mode=Objects.toString(edit.mode(),"").trim();
+        String model=Objects.toString(edit.model(),"").trim(),url=Objects.toString(edit.baseUrl(),"").trim().replaceAll("/+$","");
+        String key=Objects.toString(edit.apiKey(),"").trim();
+        if(name.isBlank() || name.length()>80 || model.isBlank() || model.length()>128
+            || url.length()>1024 || key.length()>8192 || edit.priority()<0 || edit.priority()>10000
+            || !Set.of("anthropic","compatible").contains(mode)
+            || (executor.equals("claude") && !mode.equals("anthropic")))
+            throw new ResponseStatusException(BAD_REQUEST,"Invalid account fields");
+        try {
+            var uri=URI.create(url);
+            if(!Set.of("http","https").contains(uri.getScheme()) || uri.getHost()==null || uri.getUserInfo()!=null
+                || uri.getQuery()!=null || uri.getFragment()!=null) throw new IllegalArgumentException();
+        } catch(Exception e) { throw new ResponseStatusException(BAD_REQUEST,"Invalid endpoint"); }
+        if(key.isBlank()) {
+            if(old==null || !url.equals(old.baseUrl().replaceAll("/+$","")))
+                throw new ResponseStatusException(BAD_REQUEST,"A key is required for a new endpoint");
+            key=secrets.get(id);
+        }
+        if(key.isBlank() || key.chars().anyMatch(Character::isISOControl)) throw new ResponseStatusException(BAD_REQUEST,"Invalid key");
+        if(old==null && profiles.size()>=20) throw new ResponseStatusException(CONFLICT,"Account pool is full");
+        String encrypted=vault.encrypt(key);
+        int changed=db.update("UPDATE managed_account SET name=?,mode=?,model=?,base_url=?,secret_enc=?,priority=?,updated_at=? WHERE id=?",
+            name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis(),id);
+        if(changed==0) db.update("INSERT INTO managed_account(id,name,mode,model,base_url,secret_enc,priority,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            id,name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis());
+        // A supplied replacement key may repair authentication; admin disable stays in effect.
+        if(edit.apiKey()!=null && !edit.apiKey().isBlank())
+            db.update("UPDATE account_state SET reason=NULL,retry_at=0,updated_at=? WHERE id=?",System.currentTimeMillis(),id);
+        return Map.of("id",id,"saved",true);
     }
     private void ensureState(String id) {
+        refresh();
         profile(id);
         db.update("INSERT INTO account_state(id,updated_at) VALUES(?,?) ON CONFLICT DO NOTHING",id,System.currentTimeMillis());
     }
@@ -125,26 +216,28 @@ public class AccountPool {
         else db.update("UPDATE account_state SET disabled=?,updated_at=? WHERE id=?",action.equals("disable"),System.currentTimeMillis(),id);
     }
     public Map<String,Object> snapshot() {
-        warm();
+        var view=view();warm(view);
         var accounts=new ArrayList<Map<String,Object>>();
-        for(var p:profiles) {
-            var a=admission(p); var row=new LinkedHashMap<>(p.wire());
-            row.remove("keyEnv");row.remove("baseUrl");
+        for(var p:view.profiles()) {
+            var a=admission(p,view); var row=new LinkedHashMap<>(p.wire());
+            row.remove("keyEnv");
+            row.put("priority",view.priorities().get(p.id()));
+            row.put("hasKey",!view.secrets().get(p.id()).isBlank());
             row.put("status",a.state()); row.put("reason",Objects.toString(a.reason(),""));
             row.put("retryAt",a.resumeAt()==null?0:a.resumeAt());
-            row.put("quota",quotas.get(p.id()).get());
+            row.put("quota",view.quotas().get(p.id()).get());
             var states=db.queryForList("SELECT failures,disabled FROM account_state WHERE id=?",p.id());
             row.put("failures",states.isEmpty()?0:states.getFirst().get("failures"));
             row.put("disabled",!states.isEmpty() && Boolean.TRUE.equals(states.getFirst().get("disabled")));
             accounts.add(row);
         }
-        return Map.of("accounts",accounts,"automaticSwitching",true,"configuredCount",profiles.size(),
+        return Map.of("accounts",accounts,"executor",executor,"automaticSwitching",true,"configuredCount",view.profiles().size(),
             "switches",db.queryForList("SELECT e.task_id,e.detail,e.created_at FROM run_event e JOIN task t ON t.id=e.task_id WHERE t.tenant_id=? AND e.type='ACCOUNT_SWITCHED' ORDER BY e.created_at DESC LIMIT 10",tenant));
     }
-    private void warm() {
-        java.util.concurrent.CompletableFuture.allOf(profiles.stream()
-            .filter(p->p.enabled() && !missing.contains(p.id()))
-            .map(p->java.util.concurrent.CompletableFuture.runAsync(()->quotas.get(p.id()).get()))
+    private void warm(View view) {
+        java.util.concurrent.CompletableFuture.allOf(view.profiles().stream()
+            .filter(p->p.enabled() && !view.missing().contains(p.id()))
+            .map(p->java.util.concurrent.CompletableFuture.runAsync(()->view.quotas().get(p.id()).get()))
             .toArray(java.util.concurrent.CompletableFuture[]::new)).join();
     }
 }

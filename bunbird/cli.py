@@ -81,7 +81,7 @@ def main():
                 raise ValueError("AGENT_EXECUTOR 必须是 model 或 claude")
             from bunbird.account_pool import AccountExecutor
 
-            executor = AccountExecutor(config, ModelConfig.load())
+            executor = AccountExecutor(config, ModelConfig("pool", "账号池", "", ""))
             asyncio.run(run(config, executor))
         else:
             from bunbird.control import client

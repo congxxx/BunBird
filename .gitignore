@@ -10,3 +10,4 @@ target/
 data/
 *.log
 .tools/
+output/playwright/

@@ -9,6 +9,21 @@ from bunbird.account_pool import AccountExecutor, PoolWaiting
 from bunbird.model import Model, ModelConfig, ModelError
 
 
+def test_selected_dashboard_key_takes_precedence_over_environment(monkeypatch):
+    monkeypatch.setenv("OLD_KEY", "old-key")
+    model = AccountExecutor.build(
+        {
+            "keyEnv": "OLD_KEY",
+            "apiKey": "dashboard-key",
+            "mode": "compatible",
+            "model": "test",
+            "baseUrl": "https://test/v1",
+            "executor": "model",
+        }
+    )
+    assert model.config.key == "dashboard-key"
+
+
 @pytest.mark.parametrize(
     "code,expected", [(401, "ACCOUNT_AUTH"), (402, "ACCOUNT_QUOTA"), (429, "ACCOUNT_RATE_LIMIT")]
 )

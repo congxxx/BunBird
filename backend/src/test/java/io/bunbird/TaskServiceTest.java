@@ -19,7 +19,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "bunbird.tenant=tenant-test", "bunbird.app-id=cli-test",
     "bunbird.bridge-token=bridge-012345678901234567890123456789",
     "bunbird.worker-token=worker-012345678901234567890123456789",
-    "bunbird.admin-token=admin-012345678901234567890123456789"
+    "bunbird.admin-token=admin-012345678901234567890123456789",
+    "BUNBIRD_ACCOUNT_MASTER_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 })
 @AutoConfigureMockMvc
 class TaskServiceTest {
@@ -33,7 +34,7 @@ class TaskServiceTest {
 
     @BeforeEach void clear() {
         org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","UNSUPPORTED"));
-        for (String table : List.of("account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
+        for (String table : List.of("managed_account","account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
     }
     Incoming message(String event, String user, String topic, String text) {
         return new Incoming("tenant-test","cli-test",event,"om-"+event,"chat-test",user,topic,text,"group");
@@ -402,6 +403,28 @@ class TaskServiceTest {
             .andExpect(status().isConflict());
         assertThat(db.queryForObject("SELECT failures FROM account_state WHERE id='environment'",Integer.class)).isEqualTo(1);
         mvc.perform(get("/api/accounts").header("Authorization",WORKER)).andExpect(status().isUnauthorized());
+    }
+
+    @Test void dashboardMayWriteButNeverReadsBackCredential() throws Exception {
+        String admin="Bearer admin-012345678901234567890123456789";
+        String body=json.writeValueAsString(Map.of("name","new","mode","anthropic","model","test","baseUrl","https://custom.test","apiKey","sentinel-private-key","priority",0));
+        mvc.perform(post("/api/accounts").header("Authorization",WORKER).contentType("application/json").content(body))
+            .andExpect(status().isUnauthorized());
+        String response=mvc.perform(post("/api/accounts").header("Authorization",admin).contentType("application/json").content(body))
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        assertThat(response).doesNotContain("sentinel-private-key");
+        String id=json.readTree(response).path("id").asText();
+        String listing=mvc.perform(get("/api/accounts").header("Authorization",admin)).andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString();
+        assertThat(listing).contains("hasKey").doesNotContain("sentinel-private-key","secret_enc");
+        String taskId=submit("web-key","user","web-key-topic","hello");var job=service.claim();
+        mvc.perform(post("/internal/worker/tasks/"+taskId+"/account").header("Authorization",WORKER).contentType("application/json")
+            .content(json.writeValueAsString(Map.of("leaseToken",job.get("leaseToken"),"excluded",List.of("environment")))))
+            .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store"))
+            .andExpect(jsonPath("$.apiKey").value("sentinel-private-key"));
+        assertThat(service.task(taskId).toString()).doesNotContain("sentinel-private-key");
+        mvc.perform(put("/api/accounts/"+id).header("Authorization",admin).contentType("application/json")
+            .content(body.replace("sentinel-private-key",""))).andExpect(status().isOk());
     }
 
     Incoming fileMessage(String event,String user,String topic) {
