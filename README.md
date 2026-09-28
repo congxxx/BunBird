@@ -158,3 +158,7 @@ Claude Code 换号沿用原会话、附件目录和 Git 工作区，并以恢复
 Compose 部署多个账号时，需用本地 override 将配置 JSON 只读挂载进 Control，设置容器内 `BUNBIRD_ACCOUNTS_FILE`，并给 Control 注入对应 `keyEnv` 环境变量；不要把宿主机绝对路径直接用作容器路径。基础 Compose 的默认环境账号保持兼容。
 
 看板保存的凭据以 AES-256-GCM 加密存入数据库。加密主密钥首次保存时自动生成在 Control 的 `data/account-vault.key`，可通过 `BUNBIRD_ACCOUNT_KEY_FILE` 指定路径，或使用 `BUNBIRD_ACCOUNT_MASTER_KEY` 提供 Base64 编码的 32 字节密钥。数据库和该主密钥必须一起备份，丢失或替换主密钥会导致已有凭据无法解密；不要将其提交到 Git。Compose 使用独立 `control-secrets` 卷保留主密钥。看板账号表单、列表、任务记录和普通日志不回显凭据，浏览器不将密钥写入本地存储。
+
+## SkillHub 技能管理
+
+监控看板已支持从本地技能目录或公开 HTTPS Git 仓库导入技能、查看 SKILL.md、启用及停用。后续 Claude Code 任务会挂载并获得已启用技能清单，内置附件解析保持独立。使用方式和限制见 [技能管理说明](docs/skills.md)。

@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from bunbird.agent_skills import instructions as skill_instructions
+from bunbird.agent_skills import managed_instructions
 from bunbird.attachments import prepare as prepare_attachments
 from bunbird.model import ModelError, provider_account_error
 from bunbird.workspaces import Workspaces, exclusive, git
@@ -209,7 +210,9 @@ class ClaudeAgent:
                 "--max-turns",
                 "30",
                 "--append-system-prompt",
-                POLICY + skill_instructions(folder),
+                POLICY
+                + skill_instructions(folder)
+                + managed_instructions(folder, job.get("skills", [])),
                 "--resume" if state.exists() else "--session-id",
                 key,
             ]

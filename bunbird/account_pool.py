@@ -39,6 +39,7 @@ class AccountExecutor:
         attempted = []
         failed = reason = None
         revision = 0
+        skills = None
 
         async def forward(phase, detail):
             nonlocal revision
@@ -66,6 +67,8 @@ class AccountExecutor:
                 profile = response.json()
                 if profile.get("waiting"):
                     raise PoolWaiting()
+                if skills is None:
+                    skills = profile.get("skills", [])
                 ident = profile["id"]
                 if ident in attempted:
                     raise ModelError("ACCOUNT_SELECTION_INVALID")
@@ -76,6 +79,7 @@ class AccountExecutor:
                     if hasattr(executor, "answer_with_progress"):
                         current = {
                             **job,
+                            "skills": skills,
                             "accountRetry": bool(failed) or job.get("accountRetry", False),
                         }
                         return await executor.answer_with_progress(current, forward)

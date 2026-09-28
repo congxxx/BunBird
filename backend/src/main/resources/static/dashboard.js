@@ -75,6 +75,7 @@ async function refresh() {
     if(!res.ok)throw new Error(res.status===401?"凭据无效，请检查管理员凭据。":"管理服务暂时不可用，请稍后刷新。");
     const data=await res.json();if(version!==generation)return;const firstConnection=$("content").hidden;render(data);refreshAccounts();refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
     if(firstConnection && location.hash)followNavigationHash();
+    refreshSkills();
   } catch(e) {if(version!==generation)return;text("error",e.name==="TimeoutError"?"请求超时，请检查本地服务。":e.message);$("error").hidden=false;text("connection","连接异常");$("connection").classList.remove("online");}
   finally {pending=false;$("refresh").disabled=false;}
 }
@@ -244,4 +245,65 @@ $("account-form").addEventListener("submit",async event=>{
   } catch(error) {
     if(version===generation){text("account-form-error",error.name==="TimeoutError"?"保存请求超时，请先刷新账号列表确认是否已保存，再决定是否重试。":error.message);$("account-form-error").hidden=false;}
   } finally {payload.apiKey="";accountSaving=false;$("account-save").disabled=false;$("account-cancel").disabled=false;}
+});
+
+let skillsPending=false, skillImporting=false, skillDetailVersion=0;
+async function refreshSkills() {
+  if(!credential||skillsPending)return;
+  skillsPending=true;const version=generation;
+  try {
+    const response=await fetch("/api/skills",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
+    if(!response.ok)throw new Error();
+    const skills=await response.json();if(version!==generation)return;
+    const list=$("skill-list");list.replaceChildren();
+    for(const skill of skills) {
+      const card=node("article",null,"panel account"),info=node("div"),actions=node("div",null,"account-meta");
+      info.append(node("h2",skill.name),node("p",`${skill.source_type==="git"?"Git 仓库":"本地目录"} · ${skill.source}`),node("p",`版本 ${skill.revision.slice(0,12)}`,"note"));
+      const view=node("button","查看 SKILL.md","secondary"),toggle=node("button",skill.enabled?"停用":"启用","secondary");
+      view.type=toggle.type="button";
+      view.onclick=()=>showSkill(skill.id);
+      toggle.onclick=async()=>{
+        toggle.disabled=true;const loginVersion=generation;
+        try {
+          const result=await fetch(`/api/skills/${encodeURIComponent(skill.id)}/state`,{method:"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify({enabled:!skill.enabled}),signal:AbortSignal.timeout(10000)});
+          if(!result.ok)throw new Error();
+          if(loginVersion===generation){text("skill-message","状态已更新，将用于后续任务。");await refreshSkills();}
+        } catch {if(loginVersion===generation)text("skill-message","状态更新失败，请刷新后重试。");}
+        finally {toggle.disabled=false;}
+      };
+      actions.append(node("span",skill.enabled?"已启用":"已停用","pill"),view,toggle);card.append(info,actions);list.append(card);
+    }
+    if(!skills.length)list.append(node("p","尚未导入额外技能。","note"));
+  } catch {if(version===generation)$("skill-list").replaceChildren(node("p","技能列表读取失败，请刷新重试。","note"));}
+  finally {skillsPending=false;}
+}
+async function showSkill(id) {
+  const version=++skillDetailVersion,loginVersion=generation;
+  try {
+    const response=await fetch(`/api/skills/${encodeURIComponent(id)}`,{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
+    if(!response.ok)throw new Error();
+    const skill=await response.json();if(version!==skillDetailVersion||loginVersion!==generation)return;
+    text("skill-detail-title",skill.name+" · SKILL.md");text("skill-instructions",skill.instructions);$("skill-detail").hidden=false;
+    navigationTarget=$("skills");selectNavigation("skills");$("skill-detail").scrollIntoView({block:"nearest"});
+  } catch {if(loginVersion===generation)text("skill-message","技能说明读取失败，请重试。");}
+}
+$("skill-detail-close").onclick=()=>{skillDetailVersion++;$("skill-detail").hidden=true;};
+$("skill-type").onchange=()=>{
+  const git=$("skill-type").value==="git";
+  $("skill-directory-label").hidden=!git;$("skill-directory").value="";
+  $("skill-source").placeholder=git?"https://github.com/组织/仓库.git":"服务器上的技能绝对目录路径";
+};
+$("logout").addEventListener("click",()=>{skillDetailVersion++;$("skill-detail").hidden=true;$("skill-instructions").textContent="";$("skill-import").reset();$("skill-type").onchange();});
+$("skill-import").addEventListener("submit",async event=>{
+  event.preventDefault();if(skillImporting||!credential)return;
+  const version=generation;
+  const payload={type:$("skill-type").value,source:$("skill-source").value.trim(),directory:$("skill-directory").value.trim(),name:$("skill-name").value.trim(),enabled:$("skill-enabled").checked};
+  skillImporting=true;$("skill-import-submit").disabled=true;text("skill-message","正在导入并检查技能文件…");
+  try {
+    const response=await fetch("/api/skills/import",{method:"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(75000)});
+    const result=await response.json();if(version!==generation)return;
+    if(!response.ok)throw new Error(result.message||"导入失败，请检查来源目录或仓库地址。");
+    text("skill-message",`「${result.name}」已导入${result.enabled?"并启用":"，当前为停用状态"}。`);await refreshSkills();
+  } catch(error) {if(version===generation)text("skill-message",error.name==="TimeoutError"?"请求超时，请先刷新技能列表确认导入结果。":error.message);}
+  finally {skillImporting=false;$("skill-import-submit").disabled=false;}
 });

@@ -5,6 +5,50 @@ import subprocess
 
 from bunbird.agent_skills import SOURCE, instructions, parser_manifest
 
+
+def test_managed_skill_snapshot_mount_and_disable(tmp_path):
+    import base64
+
+    from bunbird.agent_skills import managed_instructions
+
+    skill = {
+        "id": "12345678-1234-1234-1234-123456789abc",
+        "revision": "a" * 64,
+        "name": "Example",
+        "files": {
+            "SKILL.md": base64.b64encode(b"# Example").decode(),
+            "scripts/helper.py": base64.b64encode(b"print('hello')").decode(),
+        },
+    }
+    text = managed_instructions(tmp_path, [skill])
+    mounted = tmp_path / "managed-skills" / skill["id"] / skill["revision"]
+    assert str((mounted / "SKILL.md").as_posix()) in text
+    assert (mounted / "scripts/helper.py").read_text() == "print('hello')"
+    (mounted / "SKILL.md").write_text("modified by previous task")
+    managed_instructions(tmp_path, [skill])
+    assert (mounted / "SKILL.md").read_text() == "# Example"
+    disabled = managed_instructions(tmp_path, [])
+    assert "Example" not in disabled and "不要加载" in disabled
+
+
+def test_managed_skill_rejects_traversal(tmp_path):
+    import base64
+
+    import pytest
+
+    from bunbird.agent_skills import managed_instructions
+
+    for name in ("../escape", "C:/escape", "/escape", "scripts/../../escape", "scripts\\escape"):
+        skill = {
+            "id": "12345678-1234-1234-1234-123456789abc",
+            "revision": "a" * 64,
+            "name": "Example",
+            "files": {"SKILL.md": "Iw==", name: base64.b64encode(b"bad").decode()},
+        }
+        with pytest.raises(ValueError, match="Invalid skill path"):
+            managed_instructions(tmp_path, [skill])
+
+
 spec = importlib.util.spec_from_file_location("attachment_parser", SOURCE / "scripts/parse_file.py")
 parser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parser)

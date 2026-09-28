@@ -34,7 +34,7 @@ class TaskServiceTest {
 
     @BeforeEach void clear() {
         org.mockito.Mockito.when(quota.get()).thenReturn(Map.of("status","UNSUPPORTED"));
-        for (String table : List.of("session_model","managed_account","account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
+        for (String table : List.of("managed_skill","session_model","managed_account","account_state","attachment","delivery","run_event","task","ingress","topic")) db.update("DELETE FROM " + table);
     }
     Incoming message(String event, String user, String topic, String text) {
         return new Incoming("tenant-test","cli-test",event,"om-"+event,"chat-test",user,topic,text,"group");

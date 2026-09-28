@@ -11,8 +11,9 @@ import static io.bunbird.Protocol.*;
 public class Api {
     private final TaskService tasks;
     private final AccountPool accounts;
-    public Api(TaskService tasks, AccountPool accounts) {
-        this.tasks = tasks; this.accounts=accounts;
+    private final SkillHub skills;
+    public Api(TaskService tasks, AccountPool accounts,SkillHub skills) {
+        this.tasks = tasks; this.accounts=accounts;this.skills=skills;
     }
     @GetMapping("/health") public Map<String, String> health() { return Map.of("status", "ok", "service", "bunbird-control"); }
     @PostMapping("/internal/bridge/events") public Map<String, Object> receive(@Valid @RequestBody Incoming incoming) {
@@ -40,7 +41,9 @@ public class Api {
         tasks.accountFailure(id,body.leaseToken(),body.failedAccount(),body.errorCode(),accounts);
         var task=tasks.task(id);
         var selected=accounts.select(body.excluded(),(String)task.get("requested_account_id"),(String)task.get("requested_model"));
-        return tasks.assignAccount(id,body.leaseToken(),selected,accounts.admission());
+        var result=tasks.assignAccount(id,body.leaseToken(),selected,accounts.admission());
+        if(!result.containsKey("waiting"))result.put("skills",skills.bundles());
+        return result;
     }
     @GetMapping("/api/accounts") public Object accounts() { return accounts.snapshot(); }
     @PostMapping("/api/accounts/models") public Object discoverModels(@RequestBody AccountPool.Discovery body,jakarta.servlet.http.HttpServletResponse response) {
