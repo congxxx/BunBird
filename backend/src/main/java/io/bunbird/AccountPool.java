@@ -137,12 +137,17 @@ public class AccountPool {
                         Map<String,Integer> priorities,Set<String> missing) {}
     private synchronized View view() {
         refresh();
-        return new View(List.copyOf(profiles),Map.copyOf(secrets),Map.copyOf(quotas),
+        return new View(profiles.stream().filter(p->owned(p.id())).toList(),Map.copyOf(secrets),Map.copyOf(quotas),
             Map.copyOf(priorities),Set.copyOf(missing));
     }
 
+    private String tenant() { return TenantContext.tenant(tenant); }
+    private boolean owned(String id) {
+        return previousRows.stream().filter(r->id.equals(r.get("id"))).findFirst()
+            .map(r->tenant().equals(r.get("tenant_id"))).orElseGet(()->tenant().equals(tenant));
+    }
     Profile profile(String id) {
-        return profiles.stream().filter(p->p.id().equals(id)).findFirst()
+        return profiles.stream().filter(p->owned(p.id()) && p.id().equals(id)).findFirst()
             .orElseThrow(()->new ResponseStatusException(BAD_REQUEST,"Unknown account"));
     }
     QuotaAdmission admission(Profile p,View view) {
@@ -246,7 +251,7 @@ public class AccountPool {
             key=secrets.get(id);
         }
         if(key.isBlank() || key.chars().anyMatch(Character::isISOControl)) throw new ResponseStatusException(BAD_REQUEST,"Invalid key");
-        if(old==null && profiles.size()>=20) throw new ResponseStatusException(CONFLICT,"Account pool is full");
+        if(old==null && view().profiles().size()>=20) throw new ResponseStatusException(CONFLICT,"Account pool is full");
         String encrypted=vault.encrypt(key);
         var mapping=new LinkedHashMap<String,String>();
         var supplied=edit.modelMapping()==null?(old==null?Map.<String,String>of():old.modelMapping()):edit.modelMapping();
@@ -261,8 +266,8 @@ public class AccountPool {
         catch(Exception e) { throw new ResponseStatusException(BAD_REQUEST,"Invalid model mapping"); }
         int changed=db.update("UPDATE managed_account SET name=?,mode=?,model=?,base_url=?,secret_enc=?,priority=?,updated_at=? WHERE id=?",
             name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis(),id);
-        if(changed==0) db.update("INSERT INTO managed_account(id,name,mode,model,base_url,secret_enc,priority,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-            id,name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis());
+        if(changed==0) db.update("INSERT INTO managed_account(id,name,mode,model,base_url,secret_enc,priority,updated_at,tenant_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            id,name,mode,model,url,encrypted,edit.priority(),System.currentTimeMillis(),tenant());
         db.update("UPDATE managed_account SET model_mapping=? WHERE id=?",mappingJson,id);
         // A supplied replacement key may repair authentication; admin disable stays in effect.
         if(edit.apiKey()!=null && !edit.apiKey().isBlank())
@@ -305,7 +310,7 @@ public class AccountPool {
             accounts.add(row);
         }
         return Map.of("accounts",accounts,"executor",executor,"automaticSwitching",true,"configuredCount",view.profiles().size(),
-            "switches",db.queryForList("SELECT e.task_id,e.detail,e.created_at FROM run_event e JOIN task t ON t.id=e.task_id WHERE t.tenant_id=? AND e.type='ACCOUNT_SWITCHED' ORDER BY e.created_at DESC LIMIT 10",tenant));
+            "switches",db.queryForList("SELECT e.task_id,e.detail,e.created_at FROM run_event e JOIN task t ON t.id=e.task_id WHERE t.tenant_id=? AND e.type='ACCOUNT_SWITCHED' ORDER BY e.created_at DESC LIMIT 10",tenant()));
     }
     private void warm(View view) {
         java.util.concurrent.CompletableFuture.allOf(view.profiles().stream()

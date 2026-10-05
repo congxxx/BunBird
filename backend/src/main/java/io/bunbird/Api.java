@@ -12,12 +12,15 @@ public class Api {
     private final TaskService tasks;
     private final AccountPool accounts;
     private final SkillHub skills;
-    public Api(TaskService tasks, AccountPool accounts,SkillHub skills) {
-        this.tasks = tasks; this.accounts=accounts;this.skills=skills;
+    private final IdentityService identities;
+    private final java.util.concurrent.atomic.AtomicInteger turn=new java.util.concurrent.atomic.AtomicInteger();
+    public Api(TaskService tasks, AccountPool accounts,SkillHub skills,IdentityService identities) {
+        this.tasks = tasks; this.accounts=accounts;this.skills=skills;this.identities=identities;
     }
     @GetMapping("/health") public Map<String, String> health() { return Map.of("status", "ok", "service", "bunbird-control"); }
     @PostMapping("/internal/bridge/events") public Map<String, Object> receive(@Valid @RequestBody Incoming incoming) {
         tasks.requireIdentity(incoming);
+        identities.observe(incoming.senderId());
         var words=incoming.text().strip().split("\\s+",2);
         var models=incoming.attachment()==null && words[0].equalsIgnoreCase("/model") && !(words.length==2 && words[1].equalsIgnoreCase("auto"))?accounts.modelOptions():List.<AccountPool.ModelOption>of();
         try { return tasks.receive(incoming,models); }
@@ -30,8 +33,13 @@ public class Api {
     @PostMapping("/api/tasks/{id}/cancel") public Object cancel(@PathVariable String id) { return tasks.cancel(id); }
     @PostMapping("/internal/worker/claim") public Object claim() {
         // Do network I/O before entering the claim transaction or taking any topic lock.
-        if(!tasks.hasWaitingTasks()) return Map.of();
-        return tasks.claim(accounts.admission());
+        var tenants=identities.tenants();int start=Math.floorMod(turn.getAndIncrement(),tenants.size());
+        for(int i=0;i<tenants.size();i++) {
+            try(var scope=new TenantContext(identities.identity(tenants.get((start+i)%tenants.size()),"","ADMIN",false))) {
+                if(tasks.hasWaitingTasks()) { var job=tasks.claim(accounts.admission());if(!job.isEmpty())return job; }
+            }
+        }
+        return Map.of();
     }
     public record SelectAccount(@jakarta.validation.constraints.NotBlank String leaseToken,
         @jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Size(max=20) List<String> excluded,
@@ -65,5 +73,7 @@ public class Api {
     @PostMapping("/internal/worker/tasks/{id}/progress") public Object progress(@PathVariable String id, @Valid @RequestBody Progress body) { return tasks.progress(id, body); }
     @PostMapping("/internal/bridge/deliveries/claim") public Object claimDelivery() { return tasks.claimDelivery(); }
     @PostMapping("/internal/bridge/deliveries/{id}/ack") public void delivered(@PathVariable String id, @Valid @RequestBody Delivered body) { tasks.delivered(id, body); }
-    @Scheduled(fixedDelay=5000) public void expire() { tasks.expire(); }
+    @Scheduled(fixedDelay=5000) public void expire() {
+        for(String tenant:identities.tenants())try(var scope=new TenantContext(identities.identity(tenant,"","ADMIN",false))) { tasks.expire(); }
+    }
 }

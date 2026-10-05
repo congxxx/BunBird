@@ -4,7 +4,7 @@ V10 增加 `session_model` 会话偏好表，以及任务 `requested_account_id`
 
 管理员 `POST /api/accounts/models` 接收 `{accountId?, baseUrl, mode, apiKey?}` 并返回 `{models: ["model-id"]}`。编辑账号时可不传密钥，仅当地址与已保存地址相同才会复用原密钥；错误返回经过处理的 `message`，响应禁止缓存。此接口只查询，不保存账号。账号新增/编辑及 Worker 账号选择支持 `modelMapping: {haiku?, sonnet?, opus?, fable?}`；值为渠道模型 ID。省略映射时保留原配置，传空对象时清除，空白项沿用账号的默认 `model`。V9 持久化此映射，已有账号迁移为空映射。
 
-除 `GET /health` 外，接口均要求 `Authorization: Bearer <对应密钥>`。连接器、Worker 和管理员三种密钥必须不同且至少 32 字符。来源事件仅接收配置的一个 tenant/app；内部连接器被视为可信适配器，Worker 没有来源事件写入权限。接口不提供浏览器登录，管理员密钥不得嵌入前端页面。
+健康检查、静态看板和登录/邀请码注册入口公开。其他接口要求 `Authorization: Bearer <对应凭据>`。内部连接器、Worker 和原管理员密钥必须不同且至少 32 字符。连接器凭据绑定 tenant/app；Worker 没有来源事件写入权限。看板使用登录令牌和 `X-Tenant-ID` 选择所属租户，服务端每次验证成员关系；原管理员密钥仅限默认租户，不能嵌入前端页面。详见 [租户与成员](tenants.md)。
 
 | 身份 | 接口 | 用途 |
 | --- | --- | --- |
@@ -44,3 +44,12 @@ V4 增加任务 `pause_reason` 和 `resume_at`（毫秒）。`WAITING_QUOTA` 仅
 V5 增加调度锁表。全租户最多 3 个 RUNNING 或仍持有有效租约的 CANCELLED 任务；接收和领取采用相同的调度锁→话题锁顺序。`CAPACITY_QUEUE` 事件和发送阶段表示一次并发排队提示，任务本身仍为 QUEUED；领取后跳过尚未发送的排队提示。
 
 V6 增加附件表。Incoming 可选 `attachment: {id,name,size,sha256}`，仅供可信 Bridge 在下载完成后提交；文件事件只写入暂存元数据和确认通知，不创建任务。普通任务 claim 返回 `attachments` 清单，实际文件从 Bridge/Worker 共享的 ATTACHMENT_ROOT 读取并校验大小和 SHA-256。文件名不用于决定存储路径。
+
+
+## 租户和登录 API
+
+`POST /api/auth/bootstrap`（原管理员密钥，仅首次）、`POST /api/auth/login` 接收 `{username,password}`，返回内存使用的登录 `token`、`expiresAt` 和 `tenants`。`GET /api/auth/status` 返回 `initialized`，`GET /api/auth/me` 返回当前身份和租户列表，`POST /api/auth/logout` 撤销当前令牌。不要记录这些请求体或登录响应。
+
+`POST /api/auth/register` 接收 `{username,password,code}`，消费邀请码创建用户或验证已有用户后加入租户；`POST /api/auth/accept` 接收 `{code}`，供已登录用户加入其他租户。邀请码过期、重复使用或密码错误都不会产生新成员关系。
+
+`POST /api/organizations` 接收 `{id,name}`，平台管理员创建租户。`GET /api/organization/members` 查看当前租户成员；管理员用 `POST /api/organization/invitations` `{role:"ADMIN"|"MEMBER"}` 生成一次性邀请码，用 `DELETE /api/organization/members/{userId}` 移除其他成员。平台管理员用 `POST /api/organization/feishu` `{appId}` 为当前租户绑定应用/轮换 Bridge 凭据，响应中的 `bridgeToken` 仅显示一次。

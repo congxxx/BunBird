@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 const fmt = n => new Intl.NumberFormat("zh-CN").format(n);
 const stateNames = {QUEUED:"排队中",RUNNING:"执行中",SUCCEEDED:"已完成",FAILED:"失败",CANCELLED:"已中断",WAITING_QUOTA:"等待额度"};
+let currentTenant="", identity=null;
+function authHeaders() { return {Authorization:`Bearer ${credential}`,"X-Tenant-ID":currentTenant}; }
 let credential = "", pending = false, generation = 0, quotaPending = false;
 function text(id, value) { $(id).textContent = value; }
 function node(tag, value, className) { const el=document.createElement(tag); if(value!=null)el.textContent=value; if(className)el.className=className; return el; }
@@ -71,17 +73,17 @@ function render(data) {
 }
 async function refresh() {
   if(!credential||pending)return;pending=true;$("refresh").disabled=true;const version=generation;
-  try { const res=await fetch(`/api/dashboard?days=${$("days").value}`,{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
-    if(!res.ok)throw new Error(res.status===401?"凭据无效，请检查管理员凭据。":"管理服务暂时不可用，请稍后刷新。");
+  try { const res=await fetch(`/api/dashboard?days=${$("days").value}`,{headers:{...authHeaders()},cache:"no-store",signal:AbortSignal.timeout(10000)});
+    if(res.status===401||res.status===403){$("content").hidden=true;$("login").hidden=false;}
+    if(!res.ok)throw new Error(res.status===401?"登录已过期，请退出后重新登录。":"管理服务暂时不可用，请稍后刷新。");
     const data=await res.json();if(version!==generation)return;const firstConnection=$("content").hidden;render(data);refreshAccounts();refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
     if(firstConnection && location.hash)followNavigationHash();
     refreshSkills();
   } catch(e) {if(version!==generation)return;text("error",e.name==="TimeoutError"?"请求超时，请检查本地服务。":e.message);$("error").hidden=false;text("connection","连接异常");$("connection").classList.remove("online");}
-  finally {pending=false;$("refresh").disabled=false;}
+  finally {if(version===generation){pending=false;$("refresh").disabled=false;}}
 }
-$("login").addEventListener("submit",e=>{e.preventDefault();credential=$("token").value.trim();$("token").value="";generation++;refresh();});
 $("refresh").addEventListener("click",refresh);$("days").addEventListener("change",refresh);
-$("logout").addEventListener("click",()=>{credential="";generation++;$("content").hidden=true;$("login").hidden=false;$("error").hidden=true;text("connection","尚未连接");$("connection").classList.remove("online");});
+$("logout").addEventListener("click",()=>{fetch("/api/auth/logout",{method:"POST",headers:authHeaders()}).catch(()=>{});clearTenantView();credential="";identity=null;currentTenant="";$("content").hidden=true;$("login").hidden=false;$("error").hidden=true;text("connection","尚未连接");$("connection").classList.remove("online");});
 setInterval(()=>{if(!document.hidden)refresh();},15000);
 
 function renderQuota(data) {
@@ -104,34 +106,34 @@ function renderQuota(data) {
 async function refreshQuota() {
   if(!credential||quotaPending)return;quotaPending=true;const version=generation;
   try {
-    const res=await fetch("/api/quota",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(12000)});
+    const res=await fetch("/api/quota",{headers:{...authHeaders()},cache:"no-store",signal:AbortSignal.timeout(12000)});
     if(!res.ok)throw new Error("unavailable");
     const data=await res.json();if(version===generation)renderQuota(data);
   } catch {
     if(version===generation)renderQuota({message:"套餐额度暂时无法查询，请稍后刷新。"});
-  } finally {quotaPending=false;}
+  } finally {if(version===generation)quotaPending=false;}
 }
 
 let accountsPending=false, accountEditing=null, accountExecutor="model", accountSaving=false;
 const accountReasons={ACCOUNT_AUTH:"认证失败，请更新密钥后重置",ACCOUNT_QUOTA:"额度或余额不足",ACCOUNT_RATE_LIMIT:"服务商限流，冷却中",ACCOUNT_DISABLED:"管理员已停用",ACCOUNT_UNCONFIGURED:"未启用或缺少凭据",QUOTA_INTERVAL_EXHAUSTED:"短周期额度耗尽",QUOTA_WEEKLY_EXHAUSTED:"周额度耗尽",QUOTA_UNCONFIRMED:"额度暂未确认"};
 async function accountAction(id,action,button) {
-  button.disabled=true;
+  button.disabled=true;const version=generation;
   try {
-    const response=await fetch(`/api/accounts/${encodeURIComponent(id)}/${action}`,{method:"POST",headers:{Authorization:`Bearer ${credential}`},signal:AbortSignal.timeout(10000)});
+    const response=await fetch(`/api/accounts/${encodeURIComponent(id)}/${action}`,{method:"POST",headers:{...authHeaders()},signal:AbortSignal.timeout(10000)});
     if(!response.ok)throw new Error();
-    await refreshAccounts();
-  } catch {text("error","账号状态更新失败，请刷新后重试。");$("error").hidden=false;}
+    if(version===generation)await refreshAccounts();
+  } catch {if(version===generation){text("error","账号状态更新失败，请刷新后重试。");$("error").hidden=false;}}
   finally {button.disabled=false;}
 }
 async function refreshAccounts() {
   if(!credential||accountsPending)return;accountsPending=true;const version=generation;
   try {
-    const response=await fetch("/api/accounts",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(15000)});
+    const response=await fetch("/api/accounts",{headers:{...authHeaders()},cache:"no-store",signal:AbortSignal.timeout(15000)});
     if(!response.ok)throw new Error();
     const data=await response.json();if(version!==generation)return;
     accountExecutor=data.executor;
     const list=$("account-list");list.replaceChildren(node("p",`自动切换已启用 · 已登记 ${data.configuredCount} 个账号 · 按配置顺序选择` ,"note"));
-    if(data.configuredCount<2)list.append(node("p","当前只有一个账号，添加备用账号后才能实际切换。","note"));
+    if(data.configuredCount===1)list.append(node("p","当前只有一个账号，添加备用账号后才能实际切换。","note"));
     data.accounts.forEach(a=>{
       const item=node("article",null,"panel account"),main=node("div"),meta=node("div",null,"account-meta");
       main.append(node("h2",a.name),node("p",`${a.id} · ${a.executor} · ${a.model}`));
@@ -145,14 +147,14 @@ async function refreshAccounts() {
       toggle.onclick=()=>accountAction(a.id,a.disabled?"enable":"disable",toggle);
       reset.onclick=()=>accountAction(a.id,"reset",reset);
       const edit=node("button","编辑","secondary");edit.onclick=()=>openAccountForm(a);
-      meta.append(edit,toggle,reset);item.append(main,meta);list.append(item);
+      if(identity?.role==="ADMIN")meta.append(edit,toggle,reset);item.append(main,meta);list.append(item);
     });
     if(data.switches.length) {
       list.append(node("h3","最近自动切换"));
       data.switches.forEach(s=>list.append(node("p",`${new Date(s.created_at).toLocaleString("zh-CN")} · ${s.detail} · 任务 ${s.task_id.slice(0,8)}`,"note")));
     }
   } catch {if(version===generation)$("account-list").replaceChildren(node("p","账号池状态暂时不可用，请刷新重试。","note"));}
-  finally {accountsPending=false;}
+  finally {if(version===generation)accountsPending=false;}
 }
 
 const modelAliases=["haiku","sonnet","opus","fable"];
@@ -174,7 +176,7 @@ async function discoverAccountModels() {
   $("account-fetch-models").disabled=true;text("account-model-status","正在获取渠道支持的模型…");
   const payload={accountId:accountEditing?.id,baseUrl:$("account-url").value.trim(),mode:$("account-mode").value,apiKey:$("account-key").value.trim()};
   try {
-    const request=fetch("/api/accounts/models",{method:"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:controller.signal});
+    const request=fetch("/api/accounts/models",{method:"POST",headers:{...authHeaders(),"Content-Type":"application/json"},body:JSON.stringify(payload),signal:controller.signal});
     payload.apiKey="";
     const response=await request, data=await response.json();
     if(version!==modelDiscoveryVersion||loginVersion!==generation)return;
@@ -236,7 +238,7 @@ $("account-form").addEventListener("submit",async event=>{
   accountSaving=true;$("account-save").disabled=true;$("account-cancel").disabled=true;$("account-key").value="";
   resetModelDiscovery();
   try {
-    const request=fetch(id?`/api/accounts/${encodeURIComponent(id)}`:"/api/accounts",{method:id?"PUT":"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
+    const request=fetch(id?`/api/accounts/${encodeURIComponent(id)}`:"/api/accounts",{method:id?"PUT":"POST",headers:{...authHeaders(),"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
     payload.apiKey="";
     const response=await request;if(version!==generation)return;
     if(!response.ok)throw new Error(response.status===401?"登录凭据已失效，请重新连接。":response.status===409?"账号池已满，最多支持 20 个账号。":"保存失败，请检查接口地址、模型和密钥是否填写完整，协议是否兼容。");
@@ -252,7 +254,7 @@ async function refreshSkills() {
   if(!credential||skillsPending)return;
   skillsPending=true;const version=generation;
   try {
-    const response=await fetch("/api/skills",{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
+    const response=await fetch("/api/skills",{headers:{...authHeaders()},cache:"no-store",signal:AbortSignal.timeout(10000)});
     if(!response.ok)throw new Error();
     const skills=await response.json();if(version!==generation)return;
     const list=$("skill-list");list.replaceChildren();
@@ -265,22 +267,22 @@ async function refreshSkills() {
       toggle.onclick=async()=>{
         toggle.disabled=true;const loginVersion=generation;
         try {
-          const result=await fetch(`/api/skills/${encodeURIComponent(skill.id)}/state`,{method:"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify({enabled:!skill.enabled}),signal:AbortSignal.timeout(10000)});
+          const result=await fetch(`/api/skills/${encodeURIComponent(skill.id)}/state`,{method:"POST",headers:{...authHeaders(),"Content-Type":"application/json"},body:JSON.stringify({enabled:!skill.enabled}),signal:AbortSignal.timeout(10000)});
           if(!result.ok)throw new Error();
           if(loginVersion===generation){text("skill-message","状态已更新，将用于后续任务。");await refreshSkills();}
         } catch {if(loginVersion===generation)text("skill-message","状态更新失败，请刷新后重试。");}
         finally {toggle.disabled=false;}
       };
-      actions.append(node("span",skill.enabled?"已启用":"已停用","pill"),view,toggle);card.append(info,actions);list.append(card);
+      actions.append(node("span",skill.enabled?"已启用":"已停用","pill"),view);if(identity?.role==="ADMIN")actions.append(toggle);card.append(info,actions);list.append(card);
     }
     if(!skills.length)list.append(node("p","尚未导入额外技能。","note"));
   } catch {if(version===generation)$("skill-list").replaceChildren(node("p","技能列表读取失败，请刷新重试。","note"));}
-  finally {skillsPending=false;}
+  finally {if(version===generation)skillsPending=false;}
 }
 async function showSkill(id) {
   const version=++skillDetailVersion,loginVersion=generation;
   try {
-    const response=await fetch(`/api/skills/${encodeURIComponent(id)}`,{headers:{Authorization:`Bearer ${credential}`},cache:"no-store",signal:AbortSignal.timeout(10000)});
+    const response=await fetch(`/api/skills/${encodeURIComponent(id)}`,{headers:{...authHeaders()},cache:"no-store",signal:AbortSignal.timeout(10000)});
     if(!response.ok)throw new Error();
     const skill=await response.json();if(version!==skillDetailVersion||loginVersion!==generation)return;
     text("skill-detail-title",skill.name+" · SKILL.md");text("skill-instructions",skill.instructions);$("skill-detail").hidden=false;
@@ -300,10 +302,84 @@ $("skill-import").addEventListener("submit",async event=>{
   const payload={type:$("skill-type").value,source:$("skill-source").value.trim(),directory:$("skill-directory").value.trim(),name:$("skill-name").value.trim(),enabled:$("skill-enabled").checked};
   skillImporting=true;$("skill-import-submit").disabled=true;text("skill-message","正在导入并检查技能文件…");
   try {
-    const response=await fetch("/api/skills/import",{method:"POST",headers:{Authorization:`Bearer ${credential}`,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(75000)});
+    const response=await fetch("/api/skills/import",{method:"POST",headers:{...authHeaders(),"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(75000)});
     const result=await response.json();if(version!==generation)return;
     if(!response.ok)throw new Error(result.message||"导入失败，请检查来源目录或仓库地址。");
     text("skill-message",`「${result.name}」已导入${result.enabled?"并启用":"，当前为停用状态"}。`);await refreshSkills();
   } catch(error) {if(version===generation)text("skill-message",error.name==="TimeoutError"?"请求超时，请先刷新技能列表确认导入结果。":error.message);}
   finally {skillImporting=false;$("skill-import-submit").disabled=false;}
 });
+
+async function identityRequest(url,body,headers=authHeaders(),method="POST") {
+  const response=await fetch(url,{method,headers:{...headers,"Content-Type":"application/json"},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(15000)});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data.message || (response.status===429?"尝试过于频繁，请一分钟后重试。":response.status===401?"用户名、密码或登录凭据无效。":response.status===403?"没有执行此操作的权限。":"操作失败，请检查输入后重试。"));
+  return data;
+}
+async function loadIdentity() {
+  const version=generation;
+  const nextIdentity=await identityRequest("/api/auth/me",undefined,authHeaders(),"GET");
+  if(version!==generation)return;identity=nextIdentity;
+  currentTenant=identity.tenantId;
+  $("tenant-select").replaceChildren(...identity.tenants.map(t=>{const option=node("option",t.name);option.value=t.id;return option;}));
+  $("tenant-select").value=currentTenant;
+  const admin=identity.role==="ADMIN";
+  text("tenant-role",admin?"租户管理员":"成员 · 只读");text("tenant-identity",currentTenant);
+  $("account-add").hidden=!admin;$("skill-import").hidden=!admin;$("invite-form").hidden=!admin;
+  $("tenant-form").hidden=!identity.platformAdmin;$("feishu-form").hidden=!identity.platformAdmin;
+  $("skill-type").querySelector('option[value="local"]').disabled=!identity.platformAdmin;
+  if(!identity.platformAdmin){$("skill-type").value="git";$("skill-type").onchange();}
+  await loadMembers();
+}
+async function loadMembers() {
+  const version=generation;
+  const members=await identityRequest("/api/organization/members",undefined,authHeaders(),"GET");
+  if(version!==generation)return;
+  $("member-list").replaceChildren(...members.map(m=>{
+    const row=node("p",`${m.username} · ${m.role==="ADMIN"?"管理员":"成员"}`);
+    if(identity.role==="ADMIN" && m.id!==identity.userId){const remove=node("button","移除","secondary");remove.type="button";remove.onclick=()=>organizationAction(async()=>{await identityRequest(`/api/organization/members/${encodeURIComponent(m.id)}`,undefined,authHeaders(),"DELETE");await loadMembers();});row.append(" ",remove);}
+    return row;
+  }));
+}
+function clearTenantView() {
+  generation++;pending=false;quotaPending=false;accountsPending=false;skillsPending=false;$("content").hidden=true;closeAccountForm();skillDetailVersion++;$("skill-detail").hidden=true;
+  for(const id of ["account-list","skill-list","member-list","task-list","invite-result","feishu-result","organization-message","account-saved","skill-message","quota","models","bars"])$(id).replaceChildren();
+  $("skill-import").reset();$("skill-type").onchange();
+}
+async function useSession(session,preferred) {
+  clearTenantView();credential=session.token;currentTenant=preferred||session.tenants[0]?.id||"";
+  await loadIdentity();await refresh();
+}
+$("login-mode").onchange=()=>{
+  const mode=$("login-mode").value;$("invite-code-label").hidden=mode!=="register";$("invite-code").required=mode==="register";
+  $("bootstrap-token-label").hidden=mode!=="bootstrap";$("token").required=mode==="bootstrap";
+  $("password").minLength=mode==="login"?1:12;text("login-submit",mode==="login"?"登录":mode==="register"?"注册并加入":"创建管理员");
+};
+$("login").addEventListener("submit",async event=>{
+  event.preventDefault();$("login-submit").disabled=true;
+  try {
+    const mode=$("login-mode").value;
+    const session=await identityRequest(`/api/auth/${mode}`,{username:$("username").value,password:$("password").value,code:$("invite-code").value},mode==="bootstrap"?{Authorization:`Bearer ${$("token").value.trim()}`} : {});
+    $("password").value="";$("token").value="";$("invite-code").value="";await useSession(session);
+  } catch(error){text("login-note",error.message);}
+  finally {$("login-submit").disabled=false;}
+});
+$("tenant-select").onchange=async()=>{
+  clearTenantView();currentTenant=$("tenant-select").value;
+  try {await loadIdentity();await refresh();}catch(error){text("error",error.message);$("error").hidden=false;$("login").hidden=false;}
+};
+async function organizationAction(action) {
+  const version=generation;
+  try {await action();}catch(error){if(version===generation)text("organization-message",error.message);}
+}
+$("invite-form").onsubmit=event=>{event.preventDefault();organizationAction(async()=>{
+  const version=generation;const result=await identityRequest("/api/organization/invitations",{role:$("invite-role").value});
+  if(version===generation)text("invite-result",`邀请码：${result.code}（72 小时有效，仅可使用一次，请私下发给成员）`);
+});};
+$("join-form").onsubmit=event=>{event.preventDefault();organizationAction(async()=>{const result=await identityRequest("/api/auth/accept",{code:$("join-code").value});$("join-code").value="";await useSession(result,currentTenant);});};
+$("tenant-form").onsubmit=event=>{event.preventDefault();organizationAction(async()=>{const result=await identityRequest("/api/organizations",{name:$("tenant-name").value,id:$("tenant-id").value});clearTenantView();currentTenant=result.id;await loadIdentity();await refresh();$("tenant-form").reset();});};
+$("feishu-form").onsubmit=event=>{event.preventDefault();organizationAction(async()=>{
+  const version=generation;const result=await identityRequest("/api/organization/feishu",{appId:$("feishu-app").value});
+  if(version===generation)text("feishu-result",`FEISHU_TENANT_KEY=${result.tenantId}\nFEISHU_APP_ID=${result.appId}\nBUNBIRD_BRIDGE_TOKEN=${result.bridgeToken}\n请另外配置该应用的 FEISHU_APP_SECRET。连接凭据仅本次显示。`);
+});};
+fetch("/api/auth/status").then(r=>r.json()).then(status=>{if(!status.initialized){$("login-mode").value="bootstrap";$("login-mode").onchange();text("login-note","首次使用：用本机管理员凭据验证后创建登录账号，原有数据会保留。");}}).catch(()=>{});

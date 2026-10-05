@@ -16,6 +16,7 @@ class SkillHubTest {
     @BeforeEach void init() throws Exception {
         db=new JdbcTemplate(new DriverManagerDataSource("jdbc:h2:mem:"+UUID.randomUUID()+";DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1","sa",""));
         db.execute(Files.readString(Path.of("src/main/resources/db/migration/V11__skill_hub.sql")));
+        db.execute("ALTER TABLE managed_skill ADD COLUMN tenant_id VARCHAR DEFAULT ''");
         hub=new SkillHub(db,new ObjectMapper());
         Files.writeString(temp.resolve("SKILL.md"),"# A test skill\nRead scripts/helper.py when needed.");
         Files.createDirectories(temp.resolve("scripts"));Files.writeString(temp.resolve("scripts/helper.py"),"print('not executed by import')");

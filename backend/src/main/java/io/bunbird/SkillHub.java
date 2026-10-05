@@ -20,22 +20,24 @@ public class SkillHub {
     private final ObjectMapper json;
     static final int MAX_BYTES=1_048_576, MAX_FILES=100;
     public SkillHub(JdbcTemplate db,ObjectMapper json) { this.db=db;this.json=json; }
+    @org.springframework.beans.factory.annotation.Value("${bunbird.tenant:}") private String defaultTenant="";
+    private String tenant() { return TenantContext.tenant(defaultTenant); }
     public record Import(String type,String source,String directory,String name,boolean enabled) {
         @Override public String toString() { return "SkillImport[redacted]"; }
     }
     public List<Map<String,Object>> list() {
-        return db.queryForList("SELECT id,name,source_type,source,revision,enabled,created_at FROM managed_skill ORDER BY created_at,id");
+        return db.queryForList("SELECT id,name,source_type,source,revision,enabled,created_at FROM managed_skill WHERE tenant_id=? ORDER BY created_at,id",tenant());
     }
     public Map<String,Object> detail(String id) {
-        var rows=db.queryForList("SELECT id,name,source_type,source,revision,enabled,instructions,created_at FROM managed_skill WHERE id=?",id);
+        var rows=db.queryForList("SELECT id,name,source_type,source,revision,enabled,instructions,created_at FROM managed_skill WHERE id=? AND tenant_id=?",id,tenant());
         if(rows.isEmpty())throw new ResponseStatusException(NOT_FOUND,"技能不存在");
         return rows.getFirst();
     }
     public void enabled(String id,boolean enabled) {
-        if(db.update("UPDATE managed_skill SET enabled=? WHERE id=?",enabled,id)!=1)throw new ResponseStatusException(NOT_FOUND,"技能不存在");
+        if(db.update("UPDATE managed_skill SET enabled=? WHERE id=? AND tenant_id=?",enabled,id,tenant())!=1)throw new ResponseStatusException(NOT_FOUND,"技能不存在");
     }
     public List<Map<String,Object>> bundles() {
-        return db.queryForList("SELECT id,name,revision,files_json FROM managed_skill WHERE enabled=TRUE ORDER BY created_at,id").stream().map(row->{
+        return db.queryForList("SELECT id,name,revision,files_json FROM managed_skill WHERE enabled=TRUE AND tenant_id=? ORDER BY created_at,id",tenant()).stream().map(row->{
             try { return Map.<String,Object>of("id",row.get("id"),"name",row.get("name"),"revision",row.get("revision"),"files",json.readTree((String)row.get("files_json"))); }
             catch(Exception e) { throw new IllegalStateException("Invalid skill snapshot"); }
         }).toList();
@@ -43,7 +45,7 @@ public class SkillHub {
     public synchronized Map<String,Object> importSkill(Import request) {
         Path temporary=null;
         try {
-            if(db.queryForObject("SELECT COUNT(*) FROM managed_skill",Integer.class)>=20)throw new ResponseStatusException(CONFLICT,"最多支持 20 个导入技能");
+            if(db.queryForObject("SELECT COUNT(*) FROM managed_skill WHERE tenant_id=?",Integer.class,tenant())>=20)throw new ResponseStatusException(CONFLICT,"最多支持 20 个导入技能");
             String source=Objects.toString(request.source(),"").trim();
             String directory=Objects.toString(request.directory(),"").trim().replace('\\','/');
             if(source.isEmpty() || source.length()>2048 || source.chars().anyMatch(Character::isISOControl))throw new IllegalArgumentException();
@@ -76,8 +78,8 @@ public class SkillHub {
             String serialized=json.writeValueAsString(files);
             if(revision.isEmpty())revision=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(serialized.getBytes(StandardCharsets.UTF_8)));
             String id=UUID.randomUUID().toString();
-            db.update("INSERT INTO managed_skill(id,name,source_type,source,revision,enabled,files_json,instructions,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                id,name,request.type(),source+(directory.isEmpty()?"":" # "+directory),revision,request.enabled(),serialized,instructions,System.currentTimeMillis());
+            db.update("INSERT INTO managed_skill(id,name,source_type,source,revision,enabled,files_json,instructions,created_at,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                id,name,request.type(),source+(directory.isEmpty()?"":" # "+directory),revision,request.enabled(),serialized,instructions,System.currentTimeMillis(),tenant());
             return detail(id);
         } catch(ResponseStatusException e) { throw e; }
         catch(Exception e) { throw new ResponseStatusException(BAD_REQUEST,"导入失败：请检查目录、SKILL.md、UTF-8 编码和仓库访问权限；最多 100 个文件、合计 1 MB"); }

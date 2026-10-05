@@ -19,7 +19,7 @@ class AccountPoolTest {
         db.execute("CREATE TABLE task(id VARCHAR PRIMARY KEY,tenant_id VARCHAR,account_id VARCHAR)");
         db.execute("CREATE TABLE run_event(task_id VARCHAR,type VARCHAR,detail VARCHAR,created_at BIGINT)");
         db.execute("CREATE TABLE account_state(id VARCHAR PRIMARY KEY,reason VARCHAR,retry_at BIGINT DEFAULT 0,disabled BOOLEAN DEFAULT FALSE,failures INT DEFAULT 0,updated_at BIGINT)");
-        db.execute("CREATE TABLE managed_account(id VARCHAR PRIMARY KEY,name VARCHAR,mode VARCHAR,model VARCHAR,base_url VARCHAR,secret_enc VARCHAR,priority INT,updated_at BIGINT,model_mapping VARCHAR DEFAULT '{}')");
+        db.execute("CREATE TABLE managed_account(id VARCHAR PRIMARY KEY,name VARCHAR,mode VARCHAR,model VARCHAR,base_url VARCHAR,secret_enc VARCHAR,priority INT,updated_at BIGINT,model_mapping VARCHAR DEFAULT '{}',tenant_id VARCHAR DEFAULT '')");
         db.execute("CREATE TABLE account_catalog_guard(id INT PRIMARY KEY)");
         db.execute("INSERT INTO account_catalog_guard VALUES(1)");
     }

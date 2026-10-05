@@ -280,7 +280,7 @@ class TaskServiceTest {
             .andExpect(status().isOk()).andExpect(jsonPath("$.tasks").value(3))
             .andExpect(jsonPath("$.reportedTasks").value(2)).andExpect(jsonPath("$.usage.total").value(300))
             .andExpect(jsonPath("$.usage.cacheRead").value(80)).andExpect(jsonPath("$.daily.length()").value(7))
-            .andExpect(jsonPath("$.accounts[0].quotaStatus").value("UNKNOWN"))
+            .andExpect(jsonPath("$.accounts").isEmpty())
             .andReturn().getResponse().getContentAsString();
         assertThat(result).doesNotContain("private prompt sentinel","private result sentinel","usage_json","lease_token");
     }

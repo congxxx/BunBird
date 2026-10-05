@@ -5,7 +5,7 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const base = path.resolve(__dirname, '../backend/src/main/resources/static');
 (async () => {
-  const browser = await chromium.launch({channel:'msedge', headless:true});
+  const browser = await chromium.launch({headless:true,...(process.env.BUNBIRD_TEST_BROWSER?{executablePath:process.env.BUNBIRD_TEST_BROWSER}:{channel:'msedge'})});
   try {
     const page = await browser.newPage({viewport:{width:1440,height:1100}});
     const errors=[]; page.on('pageerror', e=>errors.push(e.message));
@@ -13,6 +13,12 @@ const base = path.resolve(__dirname, '../backend/src/main/resources/static');
     let requestedDays;
     await page.route('http://bunbird.test/**', async route => {
       const url=new URL(route.request().url());
+      if(url.pathname==='/api/auth/status')return route.fulfill({json:{initialized:true}});
+      if(url.pathname==='/api/auth/login')return route.request().postDataJSON().password==='synthetic-password'?route.fulfill({json:{token:'synthetic-admin',tenants:[{id:'test',name:'Test',role:'ADMIN'}]}}):route.fulfill({status:401,json:{}});
+      if(url.pathname==='/api/auth/me')return route.fulfill({json:{userId:'test-user',tenantId:'test',role:'ADMIN',platformAdmin:true,tenants:[{id:'test',name:'Test',role:'ADMIN'}]}});
+      if(url.pathname==='/api/auth/logout')return route.fulfill({json:{loggedOut:true}});
+      if(url.pathname==='/api/organization/members'||url.pathname==='/api/skills')return route.fulfill({json:[]});
+      if(url.pathname==='/api/accounts')return route.fulfill({json:{accounts:[],switches:[],configuredCount:0,executor:'claude'}});
       if(url.pathname==='/api/quota') return route.fulfill({json:{status:'AVAILABLE',plan:'Token Plan',checkedAt:Date.now(),windows:[{model:'general',kind:'interval',remainingPercent:83,startsAt:1789905600000,resetsAt:1789920000000},{model:'general',kind:'weekly',remainingPercent:97}]}});
       if(url.pathname==='/api/dashboard') {
         if(route.request().headers().authorization!=='Bearer synthetic-admin')
@@ -32,9 +38,9 @@ const base = path.resolve(__dirname, '../backend/src/main/resources/static');
         contentType:filename.endsWith('.html')?'text/html; charset=utf-8':filename.endsWith('.css')?'text/css':'text/javascript; charset=utf-8'});
     });
     await page.goto('http://bunbird.test/dashboard.html');
-    await page.locator('#token').fill('wrong'); await page.locator('#login button').click();
-    await page.locator('#error').waitFor({state:'visible'});
-    await page.locator('#token').fill('synthetic-admin'); await page.locator('#login button').click();
+    await page.locator('#username').fill('test-user');await page.locator('#password').fill('wrong'); await page.locator('#login button').click();
+    await page.waitForFunction(()=>document.querySelector('#login-note').textContent.length>0);
+    await page.locator('#password').fill('synthetic-password'); await page.locator('#login button').click();
     await page.locator('#content').waitFor({state:'visible'});
     assert.equal(await page.locator('#total').textContent(),'22,000');
     await page.getByText('剩余 83%',{exact:true}).waitFor();

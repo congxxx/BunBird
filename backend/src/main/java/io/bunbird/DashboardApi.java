@@ -30,7 +30,7 @@ public class DashboardApi {
         var zone=ZoneId.of("Asia/Shanghai");
         var today=LocalDate.now(zone);
         long since=today.minusDays(days-1).atStartOfDay(zone).toInstant().toEpochMilli();
-        var rows=db.queryForList("SELECT id,status,model,account_id,usage_json,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? AND created_at>=? ORDER BY position DESC",tenant,since);
+        var rows=db.queryForList("SELECT id,status,model,account_id,usage_json,error_code,pause_reason,resume_at,created_at,updated_at FROM task WHERE tenant_id=? AND created_at>=? ORDER BY position DESC",TenantContext.tenant(tenant),since);
         var daily=new LinkedHashMap<String,long[]>();
         for (int i=days-1;i>=0;i--) daily.put(today.minusDays(i).toString(),new long[5]);
         var statuses=new TreeMap<String,Integer>();
@@ -62,8 +62,7 @@ public class DashboardApi {
         models.forEach((name,value)->byModel.add(Map.of("model",name,"usage",metrics(value))));
         return Map.of("days",days,"tasks",rows.size(),"reportedTasks",reported,"statuses",statuses,
                 "usage",metrics(total),"daily",trend,"models",byModel,"recent",recent,
-                "accounts",List.of(Map.of("id","environment","name","当前环境配置","model",model,
-                    "executor",executor,"status","CONFIGURED","quotaStatus","UNKNOWN")),
+                "accounts",List.of(),
                 "generatedAt",System.currentTimeMillis());
     }
 

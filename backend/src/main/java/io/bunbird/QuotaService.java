@@ -99,7 +99,10 @@ public class QuotaService {
 
 @RestController
 class QuotaApi {
-    private final QuotaService quota;
-    QuotaApi(QuotaService quota) { this.quota=quota; }
-    @GetMapping("/api/quota") public Object quota() { return quota.get(); }
+    private final AccountPool accounts;
+    QuotaApi(AccountPool accounts) { this.accounts=accounts; }
+    @GetMapping("/api/quota") public Object quota() {
+        var list=(java.util.List<?>)accounts.snapshot().get("accounts");
+        return list.isEmpty()?Map.of("status","UNSUPPORTED","message","当前租户尚未配置渠道"):((Map<?,?>)list.getFirst()).get("quota");
+    }
 }
