@@ -8,49 +8,68 @@ let credential = "", pending = false, generation = 0, quotaPending = false;
 function text(id, value) { $(id).textContent = value; }
 function node(tag, value, className) { const el=document.createElement(tag); if(value!=null)el.textContent=value; if(className)el.className=className; return el; }
 const navigation = [...document.querySelectorAll("aside .nav")];
-const sections = navigation.map(link => $(link.hash.slice(1)));
-let navigationTarget = null, navigationFrame = 0;
+const pages={overview:"工作台",tasks:"任务记录",accounts:"账号与渠道",skills:"技能管理",organization:"租户与成员"};
+const openedPages=new Set(["overview"]);
+let taskRows=[],taskPage=0,taskDetailVersion=0;
 function selectNavigation(id) {
-  navigation.forEach(link => {
-    const selected = link.hash === `#${id}`;
-    link.classList.toggle("active", selected);
-    if(selected)link.setAttribute("aria-current", "location");
-    else link.removeAttribute("aria-current");
-  });
+  navigation.forEach(link=>{const selected=link.hash===`#${id}`;link.classList.toggle("active",selected);if(selected)link.setAttribute("aria-current","page");else link.removeAttribute("aria-current");});
 }
 function followNavigationHash() {
-  navigationTarget = sections.find(section => `#${section.id}` === location.hash) || sections[0];
-  selectNavigation(navigationTarget.id);
-  if(!$("content").hidden)navigationTarget.scrollIntoView({block:"start"});
+  const requested=location.hash.slice(1),id=Object.hasOwn(pages,requested)?requested:"overview";
+  if(requested!==id)history.replaceState(null,"",`#${id}`);
+  for(const key of Object.keys(pages))$(key).hidden=key!==id;
+  selectNavigation(id);text("page-name",pages[id]);document.title=`${pages[id]} · BunBird`;
+  openedPages.add(id);$("page-tabs").replaceChildren(...[...openedPages].map(key=>{const link=node("a",pages[key]);link.href=`#${key}`;if(key===id){link.className="active";link.setAttribute("aria-current","page");}return link;}));
+  $("page-tabs").hidden=!credential;
+  $("skill-detail").close();$("task-detail").close();skillDetailVersion++;taskDetailVersion++;
+  window.scrollTo({top:0});
 }
-function syncNavigation() {
-  if(navigationFrame)return;
-  navigationFrame = requestAnimationFrame(() => {
-    navigationFrame = 0;
-    if($("content").hidden || navigationTarget)return;
-    let current = sections[0];
-    for(const section of sections)if(section.getBoundingClientRect().top <= 80)current = section;
-    // The final section can be too short to reach the top of the viewport.
-    if(window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2)current = sections.at(-1);
-    selectNavigation(current.id);
+window.addEventListener("hashchange",followNavigationHash);
+function renderTasks() {
+  const query=$("task-search").value.trim().toLowerCase(),status=$("task-filter").value;
+  const rows=taskRows.filter(t=>(status==="all"||t.status===status)&&[t.id,t.model,t.account_id].some(v=>String(v||"").toLowerCase().includes(query)));
+  taskPage=Math.min(taskPage,Math.max(0,Math.ceil(rows.length/10)-1));
+  text("task-summary",`匹配 ${rows.length} / 已加载 ${taskRows.length} 条`);
+  text("task-page-label",rows.length?`第 ${taskPage+1} / ${Math.ceil(rows.length/10)} 页 · 每页 10 条`:"暂无匹配任务");
+  $("task-prev").disabled=taskPage===0;$("task-next").disabled=(taskPage+1)*10>=rows.length;
+  $("task-list").replaceChildren();
+  rows.slice(taskPage*10,taskPage*10+10).forEach(t=>{
+    const row=node("tr"),id=node("td",t.id.slice(0,8));id.title=t.id;
+    row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})),id,node("td",(t.model||"—")+(t.account_id?` / ${t.account_id}`:"")));
+    const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));
+    if(t.status==="WAITING_QUOTA"){
+      const reasons={QUOTA_WEEKLY_EXHAUSTED:"周额度已耗尽",QUOTA_INTERVAL_EXHAUSTED:"短周期额度已耗尽",QUOTA_UNCONFIRMED:"暂时无法确认额度，保留等待",ACCOUNT_POOL_UNAVAILABLE:"所有账号暂不可用"};
+      status.append(node("div",reasons[t.pause_reason]||"等待额度检查","note"),node("div",t.resume_at?`预计 ${new Date(t.resume_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})} 恢复（北京时间）`:"恢复时间待确认","note"));
+    }
+    const action=node("td"),detail=node("button","查看详情","secondary");detail.onclick=()=>showTask(t.id);action.append(detail);
+    row.append(status,node("td",t.usage?fmt(t.usage.total):"未上报"),action);$("task-list").append(row);
   });
+  if(!rows.length){const row=node("tr"),cell=node("td",taskRows.length?"没有匹配的任务，试试其他筛选条件。":"这段时间还没有任务。可在飞书发送消息开始执行。");cell.colSpan=6;row.append(cell);$("task-list").append(row);}
 }
-navigation.forEach(link => link.addEventListener("click", event => {
-  if(event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)return;
-  navigationTarget = $(link.hash.slice(1));
-  selectNavigation(navigationTarget.id);
-}));
-// Keep an explicit anchor selection even when scrolling is clamped at the page bottom.
-// Resume scroll tracking when the user starts scrolling themselves.
-for(const type of ["wheel", "touchstart", "pointerdown"])window.addEventListener(type, () => {navigationTarget = null;}, {passive:true});
-window.addEventListener("keydown", event => {
-  if(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) && !event.target.closest("input,select,textarea,[contenteditable]"))navigationTarget = null;
-});
-window.addEventListener("scroll", syncNavigation, {passive:true});
-window.addEventListener("resize", syncNavigation);
-window.addEventListener("hashchange", followNavigationHash);
-new ResizeObserver(syncNavigation).observe($("content"));
-followNavigationHash();
+async function showTask(id) {
+  const version=++taskDetailVersion,loginVersion=generation;
+  text("task-detail-meta","正在读取…");text("task-detail-prompt","");text("task-detail-result","");$("task-detail").showModal();
+  try {
+    const result=await identityRequest(`/api/tasks/${encodeURIComponent(id)}`,undefined,authHeaders(),"GET");
+    if(version!==taskDetailVersion||loginVersion!==generation)return;
+    text("task-detail-meta",`${result.id} · ${stateNames[result.status]||result.status} · ${result.model||"尚未记录模型"}`);
+    text("task-detail-prompt",result.prompt||"无正文");text("task-detail-result",result.result||result.error_code||"尚未返回结果");
+  }catch(error){if(version===taskDetailVersion&&loginVersion===generation)text("task-detail-meta",error.message);}
+}
+$("task-detail-close").onclick=()=>$("task-detail").close();
+$("task-detail").addEventListener("close",()=>{taskDetailVersion++;});
+for(const id of ["task-search","task-filter"])$(id).addEventListener("input",()=>{taskPage=0;renderTasks();});
+$("task-prev").onclick=()=>{taskPage--;renderTasks();};$("task-next").onclick=()=>{taskPage++;renderTasks();};
+function filterResources() {
+  const query=$("account-search").value.trim().toLowerCase();
+  const accounts=[...$("account-list").querySelectorAll("article")];let visibleAccounts=0;
+  for(const card of accounts){card.hidden=!card.textContent.toLowerCase().includes(query);if(!card.hidden)visibleAccounts++;}
+  text("account-summary",`显示 ${visibleAccounts} / ${accounts.length} 个账号`);
+  const skills=[...$("skill-list").querySelectorAll("article")],skillQuery=$("skill-search").value.trim().toLowerCase(),filter=$("skill-filter").value;let visibleSkills=0;
+  for(const card of skills){card.hidden=!card.dataset.search.includes(skillQuery)||(filter!=="all"&&card.dataset.state!==filter);if(!card.hidden)visibleSkills++;}
+  text("skill-summary",`显示 ${visibleSkills} / ${skills.length} 个导入技能 · 内置 1 个`);
+}
+for(const id of ["account-search","skill-search","skill-filter"])$(id).addEventListener("input",filterResources);
 function render(data) {
   text("total",fmt(data.usage.total)); text("io",`${fmt(data.usage.input)} / ${fmt(data.usage.output)}`);
   text("cache",`${fmt(data.usage.cacheRead)} / ${fmt(data.usage.cacheWrite)}`);
@@ -63,21 +82,17 @@ function render(data) {
   $("models").replaceChildren();data.models.forEach(m=>{const row=node("div",null,"model-row");row.append(node("span",m.model),node("b",fmt(m.usage.total)));$("models").append(row);});
   if(!data.models.length)$("models").append(node("p","暂无已上报的用量","muted"));
 
-  $("task-list").replaceChildren();data.recent.forEach(t=>{const row=node("tr");row.append(node("td",new Date(t.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})));const id=node("td",t.id.slice(0,8));id.title=t.id;row.append(id,node("td",(t.model||"—")+(t.account_id?` / ${t.account_id}`:"")));const status=node("td");status.append(node("span",stateNames[t.status]||t.status,"state "+t.status));if(t.status==="WAITING_QUOTA") {
-    const reasons={QUOTA_WEEKLY_EXHAUSTED:"周额度已耗尽",QUOTA_INTERVAL_EXHAUSTED:"短周期额度已耗尽",QUOTA_UNCONFIRMED:"暂时无法确认额度，保留等待",ACCOUNT_POOL_UNAVAILABLE:"所有账号暂不可用"};
-    status.append(node("div",reasons[t.pause_reason]||"等待额度检查","note"));
-    status.append(node("div",t.resume_at?`预计 ${new Date(t.resume_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})} 恢复（北京时间）`:"恢复时间待确认","note"));
-  }row.append(status,node("td",t.usage?fmt(t.usage.total):"未上报"));$("task-list").append(row);});
-  if(!data.recent.length){const row=node("tr"),cell=node("td","这段时间还没有任务");cell.colSpan=5;row.append(cell);$("task-list").append(row);}
+  taskRows=data.recent;renderTasks();
   text("updated",`更新于 ${new Date(data.generatedAt).toLocaleTimeString("zh-CN")} · 每 15 秒自动刷新`);
 }
 async function refresh() {
   if(!credential||pending)return;pending=true;$("refresh").disabled=true;const version=generation;
   try { const res=await fetch(`/api/dashboard?days=${$("days").value}`,{headers:{...authHeaders()},cache:"no-store",signal:AbortSignal.timeout(10000)});
+    if(version!==generation)return;
     if(res.status===401||res.status===403){$("content").hidden=true;$("login").hidden=false;}
     if(!res.ok)throw new Error(res.status===401?"登录已过期，请退出后重新登录。":"管理服务暂时不可用，请稍后刷新。");
     const data=await res.json();if(version!==generation)return;const firstConnection=$("content").hidden;render(data);refreshAccounts();refreshQuota();$("content").hidden=false;$("login").hidden=true;$("error").hidden=true;text("connection","● 已连接");$("connection").classList.add("online");
-    if(firstConnection && location.hash)followNavigationHash();
+    if(firstConnection)followNavigationHash();
     refreshSkills();
   } catch(e) {if(version!==generation)return;text("error",e.name==="TimeoutError"?"请求超时，请检查本地服务。":e.message);$("error").hidden=false;text("connection","连接异常");$("connection").classList.remove("online");}
   finally {if(version===generation){pending=false;$("refresh").disabled=false;}}
@@ -154,7 +169,7 @@ async function refreshAccounts() {
       data.switches.forEach(s=>list.append(node("p",`${new Date(s.created_at).toLocaleString("zh-CN")} · ${s.detail} · 任务 ${s.task_id.slice(0,8)}`,"note")));
     }
   } catch {if(version===generation)$("account-list").replaceChildren(node("p","账号池状态暂时不可用，请刷新重试。","note"));}
-  finally {if(version===generation)accountsPending=false;}
+  finally {if(version===generation){accountsPending=false;filterResources();}}
 }
 
 const modelAliases=["haiku","sonnet","opus","fable"];
@@ -206,7 +221,7 @@ function closeAccountForm() {
 }
 function openAccountForm(account=null) {
   if(accountSaving)return;
-  navigationTarget=$("accounts");selectNavigation("accounts");
+  if(location.hash!=="#accounts")location.hash="accounts";
   accountEditing=account;
   resetModelDiscovery();
   $("account-form").reset();$("account-form").hidden=false;$("account-form-error").hidden=true;$("account-saved").hidden=true;
@@ -260,6 +275,7 @@ async function refreshSkills() {
     const list=$("skill-list");list.replaceChildren();
     for(const skill of skills) {
       const card=node("article",null,"panel account"),info=node("div"),actions=node("div",null,"account-meta");
+      card.dataset.search=`${skill.name} ${skill.source}`.toLowerCase();card.dataset.state=skill.enabled?"enabled":"disabled";
       info.append(node("h2",skill.name),node("p",`${skill.source_type==="git"?"Git 仓库":"本地目录"} · ${skill.source}`),node("p",`版本 ${skill.revision.slice(0,12)}`,"note"));
       const view=node("button","查看 SKILL.md","secondary"),toggle=node("button",skill.enabled?"停用":"启用","secondary");
       view.type=toggle.type="button";
@@ -277,7 +293,7 @@ async function refreshSkills() {
     }
     if(!skills.length)list.append(node("p","尚未导入额外技能。","note"));
   } catch {if(version===generation)$("skill-list").replaceChildren(node("p","技能列表读取失败，请刷新重试。","note"));}
-  finally {if(version===generation)skillsPending=false;}
+  finally {if(version===generation){skillsPending=false;filterResources();}}
 }
 async function showSkill(id) {
   const version=++skillDetailVersion,loginVersion=generation;
@@ -286,10 +302,11 @@ async function showSkill(id) {
     if(!response.ok)throw new Error();
     const skill=await response.json();if(version!==skillDetailVersion||loginVersion!==generation)return;
     text("skill-detail-title",skill.name+" · SKILL.md");text("skill-instructions",skill.instructions);$("skill-detail").hidden=false;
-    navigationTarget=$("skills");selectNavigation("skills");$("skill-detail").scrollIntoView({block:"nearest"});
+    $("skill-detail").showModal();
   } catch {if(loginVersion===generation)text("skill-message","技能说明读取失败，请重试。");}
 }
-$("skill-detail-close").onclick=()=>{skillDetailVersion++;$("skill-detail").hidden=true;};
+$("skill-detail-close").onclick=()=>$("skill-detail").close();
+$("skill-detail").addEventListener("close",()=>{skillDetailVersion++;$("skill-detail").hidden=true;});
 $("skill-type").onchange=()=>{
   const git=$("skill-type").value==="git";
   $("skill-directory-label").hidden=!git;$("skill-directory").value="";
@@ -325,7 +342,7 @@ async function loadIdentity() {
   $("tenant-select").value=currentTenant;
   const admin=identity.role==="ADMIN";
   text("tenant-role",admin?"租户管理员":"成员 · 只读");text("tenant-identity",currentTenant);
-  $("account-add").hidden=!admin;$("skill-import").hidden=!admin;$("invite-form").hidden=!admin;
+  $("account-add").hidden=!admin;$("skill-import").hidden=!admin;$("skill-import-wrap").hidden=!admin;$("invite-form").hidden=!admin;
   $("tenant-form").hidden=!identity.platformAdmin;$("feishu-form").hidden=!identity.platformAdmin;
   $("skill-type").querySelector('option[value="local"]').disabled=!identity.platformAdmin;
   if(!identity.platformAdmin){$("skill-type").value="git";$("skill-type").onchange();}
@@ -342,8 +359,10 @@ async function loadMembers() {
   }));
 }
 function clearTenantView() {
+  taskRows=[];taskPage=0;taskDetailVersion++;$("task-detail").close();$("skill-detail").close();$("page-tabs").hidden=true;
+  for(const id of ["task-search","account-search","skill-search"])$(id).value="";$("task-filter").value="all";$("skill-filter").value="all";
   generation++;pending=false;quotaPending=false;accountsPending=false;skillsPending=false;$("content").hidden=true;closeAccountForm();skillDetailVersion++;$("skill-detail").hidden=true;
-  for(const id of ["account-list","skill-list","member-list","task-list","invite-result","feishu-result","organization-message","account-saved","skill-message","quota","models","bars"])$(id).replaceChildren();
+  for(const id of ["account-list","skill-list","member-list","task-list","invite-result","feishu-result","organization-message","account-saved","skill-message","quota","models","bars","task-detail-prompt","task-detail-result","task-detail-meta","skill-instructions"])$(id).replaceChildren();
   $("skill-import").reset();$("skill-type").onchange();
 }
 async function useSession(session,preferred) {
@@ -383,3 +402,5 @@ $("feishu-form").onsubmit=event=>{event.preventDefault();organizationAction(asyn
   if(version===generation)text("feishu-result",`FEISHU_TENANT_KEY=${result.tenantId}\nFEISHU_APP_ID=${result.appId}\nBUNBIRD_BRIDGE_TOKEN=${result.bridgeToken}\n请另外配置该应用的 FEISHU_APP_SECRET。连接凭据仅本次显示。`);
 });};
 fetch("/api/auth/status").then(r=>r.json()).then(status=>{if(!status.initialized){$("login-mode").value="bootstrap";$("login-mode").onchange();text("login-note","首次使用：用本机管理员凭据验证后创建登录账号，原有数据会保留。");}}).catch(()=>{});
+
+followNavigationHash();
