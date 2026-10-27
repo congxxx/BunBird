@@ -23,6 +23,51 @@ def success(message_id=None):
     return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id=message_id))
 
 
+def queue_card(task_id, prioritized=False):
+    text = (
+        "已优先排队，等待执行空位。不会中断正在执行的任务。"
+        if prioritized
+        else "并发会话已满（最多 3 个），当前任务排队中，空位释放后自动开始。"
+    )
+    actions = []
+    if not prioritized:
+        actions.append(
+            {
+                "tag": "button",
+                "type": "primary",
+                "text": {"tag": "plain_text", "content": "⏩ 优先处理这条"},
+                "value": {"taskId": task_id, "action": "prioritize"},
+            }
+        )
+    actions.append(
+        {
+            "tag": "button",
+            "type": "default",
+            "text": {"tag": "plain_text", "content": "↩ 撤回这条"},
+            "value": {"taskId": task_id, "action": "withdraw"},
+        }
+    )
+    return {
+        "config": {"update_multi": True},
+        "header": {
+            "template": "grey",
+            "title": {"tag": "plain_text", "content": "⏳ 已收到，排队中"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "plain_text", "content": text}},
+            {"tag": "hr"},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "仅发起人可操作。优先处理只调整排队顺序；撤回后不再执行。",
+                },
+            },
+            {"tag": "action", "actions": actions},
+        ],
+    }
+
+
 class ProgressCards:
     def __init__(self, path, sdk):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +86,12 @@ class ProgressCards:
         ).fetchone()
         if row and row[1]:
             return success(row[0])
-        content = json.dumps(card(delivery["content"]), ensure_ascii=False)
+        content = json.dumps(
+            queue_card(task, "优先" in delivery["content"])
+            if delivery.get("taskState") == "CAPACITY_QUEUE"
+            else card(delivery["content"]),
+            ensure_ascii=False,
+        )
         if row:
             return self.patch(row[0], content)
         request = reply_builder(delivery)

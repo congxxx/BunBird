@@ -9,6 +9,40 @@ from bunbird.inbox import Inbox
 from bunbird.progress_cards import ProgressCards, success
 
 
+def test_queue_card_is_updated_in_place_and_removes_actions_when_started(tmp_path):
+    replies, patches = [], []
+
+    def reply(request):
+        replies.append(json.loads(request.request_body.content))
+        return success("queue-card")
+
+    def patch(request):
+        patches.append(json.loads(request.request_body.content))
+        return success()
+
+    sdk = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(reply=reply, patch=patch)))
+    )
+    cards = ProgressCards(tmp_path / "queue.db", sdk)
+    delivery = {
+        "taskId": "task",
+        "replyTo": "message",
+        "deliveryId": "delivery",
+        "taskState": "CAPACITY_QUEUE",
+        "content": "排队中",
+    }
+    cards.update(delivery, build_reply)
+    assert len(replies[0]["elements"][-1]["actions"]) == 2
+    cards.update({**delivery, "content": "已优先排队"}, build_reply)
+    assert len(patches[-1]["elements"][-1]["actions"]) == 1
+    cards.update({**delivery, "taskState": "QUEUE_STARTED", "content": "开始处理"}, build_reply)
+    assert all(element["tag"] != "action" for element in patches[-1]["elements"])
+    cards.finish({**delivery, "taskState": "CANCELLED"})
+    cards.update(delivery, build_reply)
+    assert len(replies) == 1 and len(patches) == 3
+    cards.close()
+
+
 def test_progress_reuses_message_after_restart_and_closes_once(tmp_path):
     replies, patches = [], []
 

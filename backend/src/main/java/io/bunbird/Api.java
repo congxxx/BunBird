@@ -27,6 +27,14 @@ public class Api {
         catch (DuplicateKeyException duplicate) { return tasks.duplicate(incoming); }
     }
     @GetMapping("/api/tasks") public Object list() { return tasks.tasks(); }
+    public record QueueAction(@jakarta.validation.constraints.NotBlank String taskId,
+        @jakarta.validation.constraints.NotBlank String senderId,
+        @jakarta.validation.constraints.NotBlank String chatId,
+        @jakarta.validation.constraints.NotBlank String messageId,
+        @jakarta.validation.constraints.Pattern(regexp="prioritize|withdraw") @jakarta.validation.constraints.NotBlank String action) {}
+    @PostMapping("/internal/bridge/queue-action") public Object queueAction(@Valid @RequestBody QueueAction body) {
+        return tasks.queueAction(body);
+    }
     @GetMapping("/api/tasks/{id}") public Object task(@PathVariable String id) { return tasks.task(id); }
     @GetMapping("/api/tasks/{id}/events") public Object events(@PathVariable String id, @RequestParam(defaultValue="0") long after) { return tasks.events(id, after); }
     @GetMapping("/api/tasks/{id}/deliveries") public Object deliveries(@PathVariable String id) { return tasks.deliveries(id); }

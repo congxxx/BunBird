@@ -7,6 +7,7 @@ import threading
 import httpx
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
 
 from bunbird.attachments import download
 from bunbird.config import ControlConfig, FeishuConfig
@@ -214,7 +215,10 @@ class Bridge:
                 sent = self.cards.finish(delivery) if hasattr(self, "cards") else success()
             elif state == "QUEUED":
                 sent = success()
-            elif hasattr(self, "cards") and (state.startswith("UPDATE_") or state == "WORKSPACE"):
+            elif hasattr(self, "cards") and (
+                state.startswith("UPDATE_")
+                or state in {"WORKSPACE", "CAPACITY_QUEUE", "QUEUE_STARTED"}
+            ):
                 sent = self.cards.update(delivery, build_reply)
             else:
                 finished = (
@@ -280,6 +284,7 @@ class Bridge:
         handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(on_message)
+            .register_p2_card_action_trigger(self.on_card_action)
             .build()
         )
         thread = threading.Thread(target=self.pump, name="feishu-relay", daemon=True)
@@ -304,3 +309,47 @@ class Bridge:
             if not thread.is_alive():
                 self.http.close()
                 self.inbox.close()
+
+    def on_card_action(self, data):
+        payload = json.loads(lark.JSON.marshal(data))
+        header, event = payload.get("header", {}), payload.get("event", {})
+        operator, context = event.get("operator") or {}, event.get("context") or {}
+        value = (event.get("action") or {}).get("value") or {}
+        message = "无法操作这张排队卡片。"
+        kind = "error"
+        if (
+            header.get("app_id") == self.config.app_id
+            and operator.get("tenant_key") == self.config.tenant
+            and operator.get("open_id")
+            and context.get("open_chat_id")
+            and context.get("open_message_id")
+            and isinstance(value, dict)
+            and isinstance(value.get("taskId"), str)
+            and value.get("action") in {"prioritize", "withdraw"}
+            and (
+                not self.config.allowed_chats
+                or context["open_chat_id"] in self.config.allowed_chats
+            )
+        ):
+            try:
+                response = self.http.post(
+                    "/internal/bridge/queue-action",
+                    json={
+                        "taskId": value["taskId"],
+                        "action": value["action"],
+                        "senderId": operator["open_id"],
+                        "chatId": context["open_chat_id"],
+                        "messageId": context["open_message_id"],
+                    },
+                    timeout=2,
+                )
+                if response.status_code == 403:
+                    message = "仅任务发起人可以操作。"
+                elif response.status_code == 409:
+                    message = "卡片状态正在同步，请稍后重试。"
+                else:
+                    response.raise_for_status()
+                    message, kind = response.json()["message"], "info"
+            except (httpx.HTTPError, ValueError, KeyError):
+                message = "暂未确认操作结果，请稍后重试；重复点击不会重复调整顺序。"
+        return P2CardActionTriggerResponse({"toast": {"type": kind, "content": message}})

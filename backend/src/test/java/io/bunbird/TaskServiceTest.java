@@ -46,6 +46,37 @@ class TaskServiceTest {
         return new Completion((String)job.get("leaseToken"),"SUCCEEDED","你好",null,"test-model","{}");
     }
 
+    void queueCard(String task) {
+        db.update("INSERT INTO delivery(id,task_id,reply_to,content,status,available_at,created_at,task_state,tenant_id,platform_message_id) VALUES(?,?,?,'queue','SENT',0,0,'CAPACITY_QUEUE','tenant-test',?)",UUID.randomUUID().toString(),task,"om-card","card-"+task);
+    }
+    Api.QueueAction queueAction(String id,String user,String action) {
+        return new Api.QueueAction(id,user,"chat-test","card-"+id,action);
+    }
+    @Test void queuePriorityIsIdempotentAndDoesNotInterruptRunningTasks() {
+        var running=submit("running","owner","r","run");service.claim();
+        var older=submit("older","other","a","older");
+        var newer=submit("newer","owner","b","newer");queueCard(newer);
+        service.queueAction(queueAction(newer,"owner","prioritize"));
+        long priority=db.queryForObject("SELECT queue_priority FROM task WHERE id=?",Long.class,newer);
+        service.queueAction(queueAction(newer,"owner","prioritize"));
+        assertThat(db.queryForObject("SELECT queue_priority FROM task WHERE id=?",Long.class,newer)).isEqualTo(priority);
+        assertThat(service.task(running).get("status")).isEqualTo("RUNNING");
+        assertThat(service.claim().get("taskId")).isEqualTo(newer);
+        assertThat(service.task(older).get("status")).isEqualTo("QUEUED");
+        service.queueAction(queueAction(newer,"owner","withdraw"));
+        assertThat(service.task(newer).get("status")).isEqualTo("RUNNING");
+    }
+    @Test void queueWithdrawalChecksOwnerChatCardAndTaskState() {
+        var id=submit("waiting","owner","t","wait");queueCard(id);
+        assertThatThrownBy(()->service.queueAction(queueAction(id,"stranger","withdraw"))).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->service.queueAction(new Api.QueueAction(id,"owner","other-chat","card-"+id,"withdraw"))).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->service.queueAction(new Api.QueueAction(id,"owner","chat-test","forged-card","withdraw"))).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        service.queueAction(queueAction(id,"owner","withdraw"));
+        service.queueAction(queueAction(id,"owner","withdraw"));
+        assertThat(service.task(id).get("status")).isEqualTo("CANCELLED");
+        assertThat(service.claim()).isEmpty();
+    }
+
     @Test void repeatedEventsAndDifferentEventIdsForSameMessageCreateOneTask() throws Exception {
         var incoming=message("event","user","topic","你好");
         for (int i=0;i<10;i++) mvc.perform(post("/internal/bridge/events").header("Authorization",BRIDGE)

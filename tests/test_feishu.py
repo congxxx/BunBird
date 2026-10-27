@@ -5,10 +5,46 @@ from types import SimpleNamespace
 import httpx
 import lark_oapi as lark
 import pytest
+from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger
 
 from bunbird.config import FeishuConfig
 from bunbird.feishu import Bridge, build_reply, normalize
 from bunbird.inbox import Inbox
+
+
+def test_queue_callback_uses_verified_operator_and_context(config):
+    calls = []
+
+    def handle(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"status": "QUEUED", "message": "已优先排队"})
+
+    bridge = Bridge.__new__(Bridge)
+    bridge.config = config
+    bridge.http = httpx.Client(base_url="http://control", transport=httpx.MockTransport(handle))
+    payload = {
+        "header": {"app_id": config.app_id},
+        "event": {
+            "operator": {"tenant_key": config.tenant, "open_id": "owner"},
+            "context": {"open_chat_id": "chat", "open_message_id": "card"},
+            "action": {"value": {"taskId": "task", "action": "prioritize", "senderId": "forged"}},
+        },
+    }
+    answer = bridge.on_card_action(P2CardActionTrigger(payload))
+    assert answer.toast.content == "已优先排队"
+    assert calls == [
+        {
+            "taskId": "task",
+            "action": "prioritize",
+            "senderId": "owner",
+            "chatId": "chat",
+            "messageId": "card",
+        }
+    ]
+    payload["event"]["operator"]["tenant_key"] = "other-tenant"
+    assert bridge.on_card_action(P2CardActionTrigger(payload)).toast.type == "error"
+    assert len(calls) == 1
+    bridge.http.close()
 
 
 @pytest.fixture

@@ -219,12 +219,37 @@ public class TaskService {
     }
 
     @Transactional
+    public Map<String,Object> queueAction(Api.QueueAction action) {
+        lockScheduler();
+        var rows=db.queryForList("SELECT t.* FROM task t JOIN topic p ON p.id=t.topic_id WHERE t.id=? AND t.tenant_id=? AND p.app_id=? AND p.chat_id=? AND t.sender_id=?",
+            action.taskId(),tenant(),appId(),action.chatId(),action.senderId());
+        if(rows.isEmpty())throw new ResponseStatusException(FORBIDDEN,"Only the task owner can operate this card");
+        // Bind the callback to the actual delivered queue card, not just its editable value.
+        if(db.queryForObject("SELECT COUNT(*) FROM delivery WHERE task_id=? AND task_state='CAPACITY_QUEUE' AND platform_message_id=? AND status='SENT'",Integer.class,action.taskId(),action.messageId())==0)
+            throw new ResponseStatusException(CONFLICT,"Queue card is not ready");
+        var row=rows.getFirst();String state=(String)row.get("status");
+        if(!state.equals("QUEUED"))return Map.of("status",state,"message","任务已开始或已结束，未更改任务。");
+        if(action.action().equals("withdraw")) {
+            cancel(action.taskId());
+            return Map.of("status","CANCELLED","message","已撤回这条任务，不再执行。");
+        }
+        if(((Number)row.get("queue_priority")).longValue()==0) {
+            long priority=db.queryForObject("SELECT COALESCE(MIN(queue_priority),0)-1 FROM task WHERE tenant_id=?",Long.class,tenant());
+            db.update("UPDATE task SET queue_priority=?,updated_at=? WHERE id=?",priority,now(),action.taskId());
+            event(action.taskId(),"QUEUE_PRIORITIZED","发起人将任务移至等待队首，不中断执行中的任务");
+            enqueue(action.taskId(),(String)row.get("message_id"),"已优先排队");
+            db.update("UPDATE delivery SET task_state='CAPACITY_QUEUE' WHERE task_id=? AND id=(SELECT id FROM delivery WHERE task_id=? ORDER BY position DESC LIMIT 1)",action.taskId(),action.taskId());
+        }
+        return Map.of("status","QUEUED","message","已优先排队，等待执行空位；不会中断正在执行的任务。");
+    }
+
+    @Transactional
     public Map<String,Object> claim() { return claim(QuotaAdmission.allow()); }
 
     @Transactional
     public Map<String, Object> claim(QuotaAdmission admission) {
         lockScheduler();
-        var candidates = db.queryForList("SELECT id,topic_id FROM task WHERE status IN ('QUEUED','WAITING_QUOTA') AND tenant_id=? ORDER BY position LIMIT 100", tenant());
+        var candidates = db.queryForList("SELECT id,topic_id FROM task WHERE status IN ('QUEUED','WAITING_QUOTA') AND tenant_id=? ORDER BY queue_priority,position LIMIT 100", tenant());
         for (var candidate : candidates) {
             String topicId = (String)candidate.get("topic_id"), taskId = (String)candidate.get("id");
             db.queryForList("SELECT id FROM topic WHERE id=? FOR UPDATE", topicId);
@@ -262,6 +287,10 @@ public class TaskService {
             }
             event(taskId, "RUNNING", "Worker 已领取");
             db.update("UPDATE delivery SET status='FAILED',error_code='TASK_ALREADY_STARTED' WHERE task_id=? AND task_state='CAPACITY_QUEUE' AND status='PENDING'",taskId);
+            if(db.queryForObject("SELECT COUNT(*) FROM run_event WHERE task_id=? AND type='CAPACITY_QUEUE'",Integer.class,taskId)>0) {
+                enqueue(taskId,(String)current.get("message_id"),"已结束排队，正在开始处理。 ");
+                db.update("UPDATE delivery SET task_state='QUEUE_STARTED' WHERE task_id=? AND id=(SELECT id FROM delivery WHERE task_id=? ORDER BY position DESC LIMIT 1)",taskId,taskId);
+            }
             notifyCapacityQueue();
             var task = task(taskId);
             var history = db.queryForList("SELECT prompt,result FROM task WHERE topic_id=? AND status='SUCCEEDED' ORDER BY position DESC LIMIT 6", topicId);
