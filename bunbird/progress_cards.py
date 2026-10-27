@@ -2,14 +2,15 @@
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
 
 
-def card(text, finished=False, failed=False):
-    return {
+def card(text, finished=False, failed=False, delegations=None, model=""):
+    content = {
         "config": {"update_multi": True},
         "header": {
             "template": "red" if failed else "green" if finished else "blue",
@@ -17,6 +18,87 @@ def card(text, finished=False, failed=False):
         },
         "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}],
     }
+    if delegations:
+        if finished:
+            content["header"]["title"]["content"] = (
+                "✅ BunBird · 运行结束" if not failed else "BunBird · 任务未完成"
+            )
+        if model:
+            content["elements"].insert(
+                0, {"tag": "div", "text": {"tag": "plain_text", "content": f"主模型：{model}"}}
+            )
+        completed = sum(row["status"] != "RUNNING" for row in delegations)
+        content["elements"].extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"后台与协作 {completed}/{len(delegations)}",
+                    },
+                },
+            ]
+        )
+        rows = [["任务", "状态", "耗时", "模型", "速度", "Token"]]
+        for row in delegations:
+            elapsed = max(
+                0, (row.get("finished_at") or int(time.time() * 1000)) - row["started_at"]
+            )
+            seconds = elapsed // 1000
+            output = row.get("output_tokens")
+            speed = (
+                f"{output / (elapsed / 1000):.1f} tok/s"
+                if row.get("finished_at") and output is not None and elapsed > 0
+                else "—"
+            )
+            rows.append(
+                [
+                    row["name"],
+                    {
+                        "RUNNING": "处理中",
+                        "SUCCEEDED": "完成",
+                        "FAILED": "失败 · 主模型接手",
+                        "CANCELLED": "已中断",
+                        "LOST": "未确认 · 主模型接手",
+                    }.get(row["status"], "未知"),
+                    f"{seconds // 60}m{seconds % 60:02}s",
+                    row["model"],
+                    speed,
+                    str(row["total_tokens"]) if row.get("total_tokens") is not None else "未上报",
+                ]
+            )
+        for values in rows:
+            content["elements"].append(
+                {
+                    "tag": "column_set",
+                    "flex_mode": "flow",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [
+                                {"tag": "div", "text": {"tag": "plain_text", "content": value}}
+                            ],
+                        }
+                        for value in values
+                    ],
+                }
+            )
+        content["elements"].append(
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": "速度为输出 Token / 委派总耗时，包含请求等待；"
+                        "未返回的用量不作估算。",
+                    }
+                ],
+            }
+        )
+    return content
 
 
 def success(message_id=None):
@@ -77,6 +159,9 @@ class ProgressCards:
             "message_id TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0)"
         )
         self.db.commit()
+        if "summary" not in {row[1] for row in self.db.execute("PRAGMA table_info(progress_card)")}:
+            self.db.execute("ALTER TABLE progress_card ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            self.db.commit()
         self.api = sdk.im.v1.message
 
     def update(self, delivery, reply_builder):
@@ -86,14 +171,30 @@ class ProgressCards:
         ).fetchone()
         if row and row[1]:
             return success(row[0])
+        summary = delivery["content"]
+        if delivery.get("taskState") == "DELEGATION":
+            previous = self.db.execute(
+                "SELECT summary FROM progress_card WHERE task_id=?", (task,)
+            ).fetchone()
+            summary = previous[0] if previous and previous[0] else "正在处理请求，协作进展如下。"
         content = json.dumps(
             queue_card(task, "优先" in delivery["content"])
             if delivery.get("taskState") == "CAPACITY_QUEUE"
-            else card(delivery["content"]),
+            else card(
+                summary,
+                delegations=delivery.get("delegations"),
+                model=delivery.get("taskModel", ""),
+            ),
             ensure_ascii=False,
         )
         if row:
-            return self.patch(row[0], content)
+            response = self.patch(row[0], content)
+            if response.success():
+                with self.db:
+                    self.db.execute(
+                        "UPDATE progress_card SET summary=? WHERE task_id=?", (summary, task)
+                    )
+            return response
         request = reply_builder(delivery)
         request.request_body.msg_type = "interactive"
         request.request_body.content = content
@@ -101,8 +202,8 @@ class ProgressCards:
         if response.success():
             with self.db:
                 self.db.execute(
-                    "INSERT INTO progress_card(task_id,message_id) VALUES(?,?)",
-                    (task, response.data.message_id),
+                    "INSERT INTO progress_card(task_id,message_id,summary) VALUES(?,?,?)",
+                    (task, response.data.message_id, summary),
                 )
         return response
 
@@ -134,7 +235,16 @@ class ProgressCards:
         )
         response = self.patch(
             row[0],
-            json.dumps(card(text, finished=True, failed=state == "FAILED"), ensure_ascii=False),
+            json.dumps(
+                card(
+                    text,
+                    finished=True,
+                    failed=state != "SUCCEEDED",
+                    delegations=delivery.get("delegations"),
+                    model=delivery.get("taskModel", ""),
+                ),
+                ensure_ascii=False,
+            ),
         )
         if response.success():
             with self.db:

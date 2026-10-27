@@ -76,6 +76,10 @@ class AccountExecutor:
                 revision = max(revision, profile.get("progressOffset", 0))
                 try:
                     executor = self.factory(profile)
+                    if isinstance(executor, ClaudeAgent):
+                        executor.delegation_url = (
+                            f"{self.control.url}/internal/delegation/tasks/{job['taskId']}/"
+                        )
                     if hasattr(executor, "answer_with_progress"):
                         current = {
                             **job,

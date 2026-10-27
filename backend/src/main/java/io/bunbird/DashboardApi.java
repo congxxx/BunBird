@@ -56,6 +56,12 @@ public class DashboardApi {
                 recent.add(item);
             }
         }
+        // Delegated API calls are independent usage, never charged to the main model bucket.
+        for(var row:db.queryForList("SELECT d.* FROM delegation d JOIN task t ON t.id=d.task_id WHERE t.tenant_id=? AND d.started_at>=? AND d.total_tokens IS NOT NULL",TenantContext.tenant(tenant),since)) {
+            long[] usage={((Number)row.get("input_tokens")).longValue(),((Number)row.get("output_tokens")).longValue(),0,0,((Number)row.get("total_tokens")).longValue()};
+            String day=Instant.ofEpochMilli(((Number)row.get("started_at")).longValue()).atZone(zone).toLocalDate().toString();
+            add(total,usage);add(daily.computeIfAbsent(day,k->new long[5]),usage);add(models.computeIfAbsent((String)row.get("model"),k->new long[5]),usage);
+        }
         var trend=new ArrayList<Map<String,Object>>();
         daily.forEach((day,value)->trend.add(Map.of("date",day,"usage",metrics(value))));
         var byModel=new ArrayList<Map<String,Object>>();

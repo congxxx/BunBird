@@ -176,6 +176,15 @@ public class AccountPool {
     public Map<String,Object> select(List<String> excluded) {
         return select(excluded,null,null);
     }
+    public Map<String,Object> selectDelegate(String accountId,String model) {
+        var view=view();warm(view);
+        for(var p:view.profiles()) {
+            if(p.id().equals(accountId) || p.model().equalsIgnoreCase(model))continue;
+            if(!Set.of("anthropic","compatible").contains(p.mode()))continue;
+            if(admission(p,view).state().equals("ALLOW"))return selected(p,view);
+        }
+        return Map.of();
+    }
     public Map<String,Object> select(List<String> excluded,String requestedAccount,String requestedModel) {
         var view=view();warm(view);
         if(requestedAccount!=null && requestedModel!=null && !excluded.contains(requestedAccount)) {

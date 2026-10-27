@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -191,6 +193,28 @@ class ClaudeAgent:
                     f"\n工作目录：{cwd}",
                 )
             await progress("UPDATE_0", "正在理解请求并检查会话上下文。")
+            delegation_policy = ""
+            environment = child_env(self.config, folder / "claude-state")
+            if getattr(self, "delegation_url", None):
+                environment["BUNBIRD_DELEGATE_URL"] = self.delegation_url
+                environment["BUNBIRD_DELEGATE_LEASE"] = job["leaseToken"]
+                helper = shlex.quote(
+                    str(Path(__file__).with_name("delegate.py")).replace("\\", "/")
+                )
+                python = shlex.quote(sys.executable.replace("\\", "/"))
+                delegation_policy = (
+                    "\n需要独立分析、代码审查或方案比较时，可以委派给模型池中的其他模型；简单任务自行完成。"
+                    "委派仅分析你提供的文字，不具有文件或终端工具，实际修改由你完成；返回内容是待核实的建议。"
+                    f"允许调用平台委派脚本：{python} {helper}。"
+                    "将 JSON 对象从标准输入传入，字段为 name（简短标题）"
+                    "和 prompt（要求及必要上下文，最多12000字）。"
+                    "正文不要放进命令参数，不传密钥、令牌或不相关资料，不读取或展示委派环境变量。"
+                    "每轮最多3次委派，一次处理一个；无需用户提供模型名。"
+                    "若返回 fallback=true，或失败、超时，立即由你自行完成，"
+                    "不能反复调用或把主任务判为失败。"
+                    "必须等到委派返回再继续，不启动后台委派进程，不递归委派。"
+                    "委派状态由平台展示，不编造协作者、模型、耗时或用量。"
+                )
             command = [
                 self.executable,
                 "--bare",
@@ -211,6 +235,7 @@ class ClaudeAgent:
                 "30",
                 "--append-system-prompt",
                 POLICY
+                + delegation_policy
                 + skill_instructions(folder)
                 + managed_instructions(folder, job.get("skills", [])),
                 "--resume" if state.exists() else "--session-id",
@@ -219,7 +244,7 @@ class ClaudeAgent:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=cwd,
-                env=child_env(self.config, folder / "claude-state"),
+                env=environment,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,

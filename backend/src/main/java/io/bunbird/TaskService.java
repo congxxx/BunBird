@@ -353,6 +353,40 @@ public class TaskService {
         return Map.of("accepted", true);
     }
 
+    @Transactional
+    public Map<String,Object> delegationParent(String taskId,String token) { return leasedTask(taskId,token); }
+
+    @Transactional
+    public Map<String,Object> beginDelegation(String taskId,String token,String name,Map<String,Object> profile) {
+        var parent=leasedTask(taskId,token);
+        db.update("UPDATE delegation SET status='LOST',finished_at=started_at+180000 WHERE task_id=? AND status='RUNNING' AND started_at<?",taskId,now()-180_000);
+        if(profile.isEmpty() || db.queryForObject("SELECT COUNT(*) FROM delegation WHERE task_id=?",Integer.class,taskId)>=3
+            || db.queryForObject("SELECT COUNT(*) FROM delegation WHERE task_id=? AND status='RUNNING'",Integer.class,taskId)>0)
+            return Map.of("fallback",true,"message","没有可用的其他模型或已达本轮委派上限，请主模型自行完成。");
+        String delegateId=id();
+        db.update("INSERT INTO delegation(id,task_id,name,model,status,started_at) VALUES(?,?,?,?,'RUNNING',?)",delegateId,taskId,name,profile.get("model"),now());
+        delegationNotice(taskId,parent);
+        var result=new LinkedHashMap<String,Object>(profile);result.put("delegationId",delegateId);return result;
+    }
+
+    @Transactional
+    public Map<String,Object> finishDelegation(String taskId,String token,Api.DelegateFinish body) {
+        var parent=leasedTask(taskId,token);
+        if((body.totalTokens()==null)!=(body.inputTokens()==null) || (body.totalTokens()==null)!=(body.outputTokens()==null))
+            throw new ResponseStatusException(BAD_REQUEST,"Usage must be complete or unknown");
+        int changed=db.update("UPDATE delegation SET status=?,finished_at=?,input_tokens=?,output_tokens=?,total_tokens=? WHERE id=? AND task_id=? AND status='RUNNING'",
+            body.status(),now(),body.inputTokens(),body.outputTokens(),body.totalTokens(),body.id(),taskId);
+        if(changed>0)delegationNotice(taskId,parent);
+        return Map.of("accepted",true);
+    }
+    private void delegationNotice(String taskId,Map<String,Object> parent) {
+        enqueue(taskId,(String)parent.get("message_id"),"协作任务状态已更新。");
+        db.update("UPDATE delivery SET task_state='DELEGATION' WHERE task_id=? AND id=(SELECT id FROM delivery WHERE task_id=? ORDER BY position DESC LIMIT 1)",taskId,taskId);
+    }
+    public List<Map<String,Object>> delegations(String taskId) {
+        return db.queryForList("SELECT d.id,d.name,d.model,CASE WHEN d.status='RUNNING' AND t.status NOT IN ('RUNNING','QUEUED','WAITING_QUOTA') THEN CASE WHEN t.status='CANCELLED' THEN 'CANCELLED' ELSE 'LOST' END ELSE d.status END AS status,d.started_at,COALESCE(d.finished_at,CASE WHEN t.status NOT IN ('RUNNING','QUEUED','WAITING_QUOTA') THEN t.updated_at END) AS finished_at,d.input_tokens,d.output_tokens,d.total_tokens FROM delegation d JOIN task t ON t.id=d.task_id WHERE d.task_id=? AND t.tenant_id=? ORDER BY d.started_at,d.id",taskId,tenant());
+    }
+
     private Map<String,Object> leasedTask(String taskId,String token) {
         var rows=db.queryForList("SELECT * FROM task WHERE id=? AND tenant_id=? FOR UPDATE",taskId,tenant());
         if(rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND);
@@ -392,6 +426,7 @@ public class TaskService {
                 enqueue(taskId,(String)row.get("message_id"),"原选账号暂不可用，本轮已切换至 "+account.get("name")+" / "+account.get("model")+"。会话上下文和工作区继续保留。");
         }
         var selected=new LinkedHashMap<>(account);
+        db.update("UPDATE task SET model=? WHERE id=?",account.get("model"),taskId);
         int offset=0;
         for(var type:db.queryForList("SELECT type FROM run_event WHERE task_id=? AND type LIKE 'PROGRESS_UPDATE_%'",String.class,taskId)) {
             try { offset=Math.max(offset,Integer.parseInt(type.substring("PROGRESS_UPDATE_".length()))); }
@@ -420,8 +455,12 @@ public class TaskService {
         for (var row : rows) {
             String token = id(), deliveryId = (String)row.get("id");
             if (db.update("UPDATE delivery SET status='SENDING',lease_token=?,available_at=?,attempts=attempts+1 WHERE id=? AND status IN ('PENDING','SENDING') AND available_at<=? AND attempts<5",
-                    token, now()+60_000, deliveryId, now()) == 1)
-                return Map.of("deliveryId", deliveryId, "leaseToken", token, "replyTo", row.get("reply_to"), "content", row.get("content"), "replyInThread", row.get("reply_in_thread"), "taskState", Objects.toString(row.get("task_state"), ""), "taskId", Objects.toString(row.get("task_id"), ""));
+                    token, now()+60_000, deliveryId, now()) == 1) {
+                var result=new LinkedHashMap<String,Object>(Map.of("deliveryId", deliveryId, "leaseToken", token, "replyTo", row.get("reply_to"), "content", row.get("content"), "replyInThread", row.get("reply_in_thread"), "taskState", Objects.toString(row.get("task_state"), ""), "taskId", Objects.toString(row.get("task_id"), "")));
+                result.put("delegations",delegations(Objects.toString(row.get("task_id"),"")));
+                if(row.get("task_id")!=null)result.put("taskModel",Objects.toString(task((String)row.get("task_id")).get("model"),""));
+                return result;
+            }
         }
         return Map.of();
     }

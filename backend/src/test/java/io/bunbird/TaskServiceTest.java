@@ -77,6 +77,29 @@ class TaskServiceTest {
         assertThat(service.claim()).isEmpty();
     }
 
+    @Test void delegationIsLeaseBoundAndDoesNotCreateFakeFallbackRows() throws Exception {
+        String id=submit("delegate","owner","delegate-topic","review");var job=service.claim();String lease=(String)job.get("leaseToken");
+        assertThat(service.beginDelegation(id,lease,"Review",Map.of())).containsEntry("fallback",true);
+        assertThat(service.delegations(id)).isEmpty();
+        mvc.perform(post("/internal/delegation/tasks/"+id+"/begin").header("Authorization","Bearer invalid")
+            .contentType("application/json").content("{\"name\":\"review\"}")).andExpect(status().isConflict());
+        var profile=Map.<String,Object>of("model","other-model","apiKey","secret-test");
+        var started=service.beginDelegation(id,lease,"Review",profile);
+        String child=(String)started.get("delegationId");
+        assertThat(service.beginDelegation(id,lease,"Duplicate",profile)).containsEntry("fallback",true);
+        var result=new Api.DelegateFinish(child,"SUCCEEDED",100L,20L,120L);
+        service.finishDelegation(id,lease,result);service.finishDelegation(id,lease,result);
+        assertThat(service.delegations(id)).hasSize(1);
+        assertThat(service.delegations(id).getFirst()).containsEntry("status","SUCCEEDED").containsEntry("total_tokens",120L);
+        assertThat(service.delegations(id).toString()).doesNotContain("secret-test");
+        mvc.perform(get("/api/dashboard").header("Authorization","Bearer admin-012345678901234567890123456789"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.usage.total").value(120));
+        mvc.perform(get("/api/tasks").header("Authorization","Bearer "+lease)).andExpect(status().isUnauthorized());
+        service.cancel(id);
+        assertThatThrownBy(()->service.beginDelegation(id,lease,"late",profile)).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->service.finishDelegation(id,lease,result)).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
+
     @Test void repeatedEventsAndDifferentEventIdsForSameMessageCreateOneTask() throws Exception {
         var incoming=message("event","user","topic","你好");
         for (int i=0;i<10;i++) mvc.perform(post("/internal/bridge/events").header("Authorization",BRIDGE)

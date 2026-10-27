@@ -217,7 +217,7 @@ class Bridge:
                 sent = success()
             elif hasattr(self, "cards") and (
                 state.startswith("UPDATE_")
-                or state in {"WORKSPACE", "CAPACITY_QUEUE", "QUEUE_STARTED"}
+                or state in {"WORKSPACE", "CAPACITY_QUEUE", "QUEUE_STARTED", "DELEGATION"}
             ):
                 sent = self.cards.update(delivery, build_reply)
             else:

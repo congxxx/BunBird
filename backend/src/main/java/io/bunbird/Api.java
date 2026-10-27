@@ -27,6 +27,23 @@ public class Api {
         catch (DuplicateKeyException duplicate) { return tasks.duplicate(incoming); }
     }
     @GetMapping("/api/tasks") public Object list() { return tasks.tasks(); }
+    public record DelegateBegin(@jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Size(max=160) String name) {}
+    public record DelegateFinish(@jakarta.validation.constraints.NotBlank String id,
+        @jakarta.validation.constraints.Pattern(regexp="SUCCEEDED|FAILED") @jakarta.validation.constraints.NotBlank String status,
+        @jakarta.validation.constraints.Min(0) Long inputTokens,
+        @jakarta.validation.constraints.Min(0) Long outputTokens,
+        @jakarta.validation.constraints.Min(0) Long totalTokens) {}
+    @PostMapping("/internal/delegation/tasks/{id}/begin") public Object delegateBegin(@PathVariable String id,
+            @RequestHeader("Authorization") String auth,@Valid @RequestBody DelegateBegin body) {
+        String token=auth.substring(7);
+        var parent=tasks.delegationParent(id,token);
+        var profile=accounts.selectDelegate(Objects.toString(parent.get("account_id"),""),Objects.toString(parent.get("model"),""));
+        return tasks.beginDelegation(id,token,body.name(),profile);
+    }
+    @PostMapping("/internal/delegation/tasks/{id}/finish") public Object delegateFinish(@PathVariable String id,
+            @RequestHeader("Authorization") String auth,@Valid @RequestBody DelegateFinish body) {
+        return tasks.finishDelegation(id,auth.substring(7),body);
+    }
     public record QueueAction(@jakarta.validation.constraints.NotBlank String taskId,
         @jakarta.validation.constraints.NotBlank String senderId,
         @jakarta.validation.constraints.NotBlank String chatId,

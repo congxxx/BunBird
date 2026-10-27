@@ -63,6 +63,13 @@ class AccountPoolTest {
         pool.failure("primary","ACCOUNT_AUTH");
         assertThat(pool.admission().state()).isEqualTo("BLOCK");
     }
+    @Test void delegateRequiresDifferentAvailableModel() throws Exception {
+        var pool=pool(true);
+        assertThat(pool.selectDelegate("primary","model")).isEmpty();
+        assertThat(pool.selectDelegate("primary","custom-model")).containsEntry("id","backup");
+        pool.change("backup","disable");
+        assertThat(pool.selectDelegate("primary","custom-model")).isEmpty();
+    }
     @Test void preferredModelOverridesDefaultButFallbackUsesItsOwnModel() throws Exception {
         var pool=pool(true);
         assertThat(pool.select(List.of(),"backup","chosen-model")).containsEntry("id","backup").containsEntry("model","chosen-model");

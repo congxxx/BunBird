@@ -46,7 +46,13 @@ public class AccessFilter extends OncePerRequestFilter {
             if(authorization==null || !authorization.startsWith("Bearer "))throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED);
             String token=authorization.substring(7);
             TenantContext.Identity identity;
-            if(path.startsWith("/internal/bridge/")) identity=identities.bridge(token);
+            if(path.matches("/internal/delegation/tasks/[^/]+/(begin|finish)")) {
+                String taskId=path.split("/")[4];
+                identity=identities.forTask(taskId);
+                // Only these two endpoints accept the task-scoped, expiring execution lease.
+                // TaskService checks the lease and tenant again inside each mutation.
+            }
+            else if(path.startsWith("/internal/bridge/")) identity=identities.bridge(token);
             else if(path.startsWith("/internal/worker/")) {
                 if(!same(token,worker))throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED);
                 String[] parts=path.split("/");
