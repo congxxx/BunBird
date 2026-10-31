@@ -158,7 +158,12 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
                         "text": "<progress>已确认需要创建项目文件，"
                         "接下来写入并检查内容。</progress>",
                     },
-                    {"type": "tool_use", "name": "Write", "input": {"secret": "do-not-forward"}},
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "Write",
+                        "input": {"secret": "do-not-forward"},
+                    },
                 ]
             },
         },
@@ -176,10 +181,11 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
         encoding="utf-8",
     )
     original = asyncio.create_subprocess_exec
-    commands, notices = [], []
+    commands, notices, environments = [], [], []
 
     async def spawn(*args, **kwargs):
         commands.append(args)
+        environments.append(kwargs["env"])
         return await original(sys.executable, str(script), **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
@@ -188,15 +194,22 @@ def test_print_stream_resume_and_permission_failure(tmp_path, monkeypatch, denie
         notices.append((phase, detail))
 
     async def scenario():
-        for _ in range(2):
+        for effort in ("high", "auto"):
             if denied:
                 with pytest.raises(ModelError, match="CLAUDE_PERMISSION_DENIED"):
                     await agent.answer_with_progress(job(), progress)
             else:
-                assert (await agent.answer_with_progress(job(), progress))["result"] == "finished"
+                result = await agent.answer_with_progress(
+                    job(effort=effort, replyStyle="professional"), progress
+                )
+                assert result["result"] == "finished"
+                assert json.loads(result["usageJson"])["bunbird_tool_calls"] == 1
 
     asyncio.run(scenario())
     assert "--session-id" in commands[0] and "--resume" in commands[1]
+    if not denied:
+        assert [env["CLAUDE_CODE_EFFORT_LEVEL"] for env in environments] == ["high", "auto"]
+        assert "正式" in commands[0][commands[0].index("--append-system-prompt") + 1]
     for command in commands:
         assert "read-attachments" in command[command.index("--append-system-prompt") + 1]
     assert job()["prompt"] not in commands[0]

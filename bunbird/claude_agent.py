@@ -18,6 +18,7 @@ from bunbird.agent_skills import instructions as skill_instructions
 from bunbird.agent_skills import managed_instructions
 from bunbird.attachments import prepare as prepare_attachments
 from bunbird.model import ModelError, provider_account_error
+from bunbird.preferences import reply_style
 from bunbird.workspaces import Workspaces, exclusive, git
 
 POLICY = (
@@ -195,6 +196,10 @@ class ClaudeAgent:
             await progress("UPDATE_0", "正在理解请求并检查会话上下文。")
             delegation_policy = ""
             environment = child_env(self.config, folder / "claude-state")
+            environment["CLAUDE_CODE_EFFORT_LEVEL"] = "auto"
+            if job.get("effort") in {"low", "medium", "high", "xhigh", "max"}:
+                environment["CLAUDE_CODE_EFFORT_LEVEL"] = job["effort"]
+            style_policy = reply_style(job)
             if getattr(self, "delegation_url", None):
                 environment["BUNBIRD_DELEGATE_URL"] = self.delegation_url
                 environment["BUNBIRD_DELEGATE_LEASE"] = job["leaseToken"]
@@ -235,6 +240,8 @@ class ClaudeAgent:
                 "30",
                 "--append-system-prompt",
                 POLICY
+                + "\n回复风格偏好（不改变任务权限或事实要求）："
+                + style_policy
                 + delegation_policy
                 + skill_instructions(folder)
                 + managed_instructions(folder, job.get("skills", [])),
@@ -256,6 +263,7 @@ class ClaudeAgent:
                 ),
             )
             result = None
+            tool_ids = set()
             account_error = None
             revision, last_update = 0, 0.0
             streamed_text, pending_summary, last_summary = "", "", ""
@@ -308,6 +316,9 @@ class ClaudeAgent:
                             "rate_limit": "ACCOUNT_RATE_LIMIT",
                         }.get(event.get("error"), account_error)
                         blocks = event.get("message", {}).get("content", [])
+                        tool_ids.update(
+                            b["id"] for b in blocks if b.get("type") == "tool_use" and b.get("id")
+                        )
                         text = "\n".join(
                             b.get("text", "") for b in blocks if b.get("type") == "text"
                         )
@@ -339,7 +350,9 @@ class ClaudeAgent:
                 return {
                     "result": answer[:11000],
                     "model": self.config.name,
-                    "usageJson": json.dumps(result.get("usage", {}))[:4000],
+                    "usageJson": json.dumps(
+                        {**result.get("usage", {}), "bunbird_tool_calls": len(tool_ids)}
+                    )[:4000],
                 }
             finally:
                 await stop_tree(process)

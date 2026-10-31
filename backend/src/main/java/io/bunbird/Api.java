@@ -27,6 +27,14 @@ public class Api {
         catch (DuplicateKeyException duplicate) { return tasks.duplicate(incoming); }
     }
     @GetMapping("/api/tasks") public Object list() { return tasks.tasks(); }
+    public record SessionAction(@jakarta.validation.constraints.NotBlank String taskId,
+        @jakarta.validation.constraints.NotBlank String senderId,@jakarta.validation.constraints.NotBlank String chatId,
+        @jakarta.validation.constraints.NotBlank String messageId,
+        @jakarta.validation.constraints.Pattern(regexp="model|effort|style|usage|help|set_model|set_effort|set_style") @jakarta.validation.constraints.NotBlank String action,
+        @jakarta.validation.constraints.Size(max=256) String option) {}
+    @PostMapping("/internal/bridge/session-action") public Object sessionAction(@Valid @RequestBody SessionAction body) {
+        return tasks.sessionAction(body,body.action().contains("model")?accounts.quickModelOptions():List.of());
+    }
     public record DelegateBegin(@jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Size(max=160) String name) {}
     public record DelegateFinish(@jakarta.validation.constraints.NotBlank String id,
         @jakarta.validation.constraints.Pattern(regexp="SUCCEEDED|FAILED") @jakarta.validation.constraints.NotBlank String status,

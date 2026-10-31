@@ -47,6 +47,46 @@ def test_queue_callback_uses_verified_operator_and_context(config):
     bridge.http.close()
 
 
+def test_session_callback_forwards_selected_option_and_returns_replacement_card(config):
+    calls = []
+
+    def handle(request):
+        assert request.url.path == "/internal/bridge/session-action"
+        calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "message": "已设置",
+                "panel": "style",
+                "summary": {"taskId": "task", "status": "SUCCEEDED", "model": "test"},
+            },
+        )
+
+    bridge = Bridge.__new__(Bridge)
+    bridge.config = config
+    bridge.http = httpx.Client(base_url="http://control", transport=httpx.MockTransport(handle))
+    answer = bridge.on_card_action(
+        P2CardActionTrigger(
+            {
+                "header": {"app_id": config.app_id},
+                "event": {
+                    "operator": {"tenant_key": config.tenant, "open_id": "owner"},
+                    "context": {"open_chat_id": "chat", "open_message_id": "card"},
+                    "action": {
+                        "value": {"taskId": "task", "action": "set_style"},
+                        "option": "professional",
+                    },
+                },
+            }
+        )
+    )
+    assert calls[0]["option"] == "professional" and calls[0]["senderId"] == "owner"
+    result = json.loads(lark.JSON.marshal(answer))
+    assert result["card"]["type"] == "raw"
+    assert len(result["card"]["data"]["elements"][-1]["actions"]) == 5
+    bridge.http.close()
+
+
 @pytest.fixture
 def config(tmp_path):
     return FeishuConfig(

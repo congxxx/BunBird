@@ -143,6 +143,8 @@ public class TaskService {
         db.update("INSERT INTO task(id,tenant_id,topic_id,sender_id,message_id,prompt,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'QUEUED',?,?)",
                 taskId, tenant(), topicId, in.senderId(), in.messageId(), text, now(), now());
         var preference=db.queryForList("SELECT account_id,model FROM session_model WHERE topic_id=? AND sender_id=?",topicId,in.senderId());
+        var settings=SessionControls.settings(db,topicId,in.senderId());
+        db.update("UPDATE task SET effort=?,reply_style=? WHERE id=?",settings.get("effort"),settings.get("style"),taskId);
         if(!preference.isEmpty())db.update("UPDATE task SET requested_account_id=?,requested_model=? WHERE id=?",preference.getFirst().get("account_id"),preference.getFirst().get("model"),taskId);
         db.update("UPDATE ingress SET task_id=? WHERE id=?", taskId, ingressId);
         db.update("UPDATE attachment SET task_id=? WHERE tenant_id=? AND app_id=? AND chat_id=? AND sender_id=? AND scope_key=? AND task_id IS NULL",
@@ -216,6 +218,16 @@ public class TaskService {
 
     public boolean hasWaitingTasks() {
         return db.queryForObject("SELECT COUNT(*) FROM task WHERE tenant_id=? AND status IN ('QUEUED','WAITING_QUOTA')",Integer.class,tenant())>0;
+    }
+    @Transactional
+    public Map<String,Object> sessionAction(Api.SessionAction action,List<AccountPool.ModelOption> models) {
+        lockScheduler();
+        var rows=db.queryForList("SELECT t.* FROM task t JOIN topic p ON p.id=t.topic_id WHERE t.id=? AND t.tenant_id=? AND p.app_id=? AND p.chat_id=? AND t.sender_id=?",action.taskId(),tenant(),appId(),action.chatId(),action.senderId());
+        if(rows.isEmpty())throw new ResponseStatusException(FORBIDDEN);
+        var task=rows.getFirst();db.queryForList("SELECT id FROM topic WHERE id=? FOR UPDATE",task.get("topic_id"));
+        if(!Set.of("SUCCEEDED","FAILED","CANCELLED").contains(task.get("status")))throw new ResponseStatusException(CONFLICT);
+        if(db.queryForObject("SELECT COUNT(*) FROM delivery WHERE task_id=? AND platform_message_id=? AND status='SENT' AND (task_state LIKE 'UPDATE_%' OR task_state IN ('WORKSPACE','CAPACITY_QUEUE','QUEUE_STARTED','DELEGATION'))",Integer.class,action.taskId(),action.messageId())==0)throw new ResponseStatusException(FORBIDDEN);
+        var result=SessionControls.action(db,task,action,models);result.put("delegations",delegations(action.taskId()));return result;
     }
 
     @Transactional
@@ -426,6 +438,9 @@ public class TaskService {
                 enqueue(taskId,(String)row.get("message_id"),"原选账号暂不可用，本轮已切换至 "+account.get("name")+" / "+account.get("model")+"。会话上下文和工作区继续保留。");
         }
         var selected=new LinkedHashMap<>(account);
+        selected.put("replyStyle",row.get("reply_style"));
+        selected.put("effort","claude".equals(account.get("executor")) && SessionControls.effortLevels((String)account.get("model")).contains(row.get("effort"))?row.get("effort"):"auto");
+        db.update("UPDATE task SET effort=?,executor_kind=? WHERE id=?",selected.get("effort"),account.getOrDefault("executor","model"),taskId);
         db.update("UPDATE task SET model=? WHERE id=?",account.get("model"),taskId);
         int offset=0;
         for(var type:db.queryForList("SELECT type FROM run_event WHERE task_id=? AND type LIKE 'PROGRESS_UPDATE_%'",String.class,taskId)) {
@@ -459,6 +474,7 @@ public class TaskService {
                 var result=new LinkedHashMap<String,Object>(Map.of("deliveryId", deliveryId, "leaseToken", token, "replyTo", row.get("reply_to"), "content", row.get("content"), "replyInThread", row.get("reply_in_thread"), "taskState", Objects.toString(row.get("task_state"), ""), "taskId", Objects.toString(row.get("task_id"), "")));
                 result.put("delegations",delegations(Objects.toString(row.get("task_id"),"")));
                 if(row.get("task_id")!=null)result.put("taskModel",Objects.toString(task((String)row.get("task_id")).get("model"),""));
+                if(row.get("task_id")!=null && Set.of("SUCCEEDED","FAILED","CANCELLED","SUPERSEDED").contains(Objects.toString(row.get("task_state"),"")))result.put("summary",SessionControls.summary(db,(String)row.get("task_id")));
                 return result;
             }
         }

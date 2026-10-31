@@ -1,0 +1,10 @@
+CREATE TABLE session_settings (
+ topic_id VARCHAR(64) NOT NULL REFERENCES topic(id) ON DELETE CASCADE,
+ sender_id VARCHAR(128) NOT NULL,
+ effort VARCHAR(16) NOT NULL DEFAULT 'auto',
+ style VARCHAR(16) NOT NULL DEFAULT 'concise',
+ PRIMARY KEY(topic_id,sender_id)
+);
+ALTER TABLE task ADD COLUMN effort VARCHAR(16) NOT NULL DEFAULT 'auto';
+ALTER TABLE task ADD COLUMN reply_style VARCHAR(16) NOT NULL DEFAULT 'concise';
+ALTER TABLE task ADD COLUMN executor_kind VARCHAR(16) NOT NULL DEFAULT 'model';

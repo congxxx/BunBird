@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from bunbird.config import required
+from bunbird.preferences import reply_style
 
 SYSTEM = (
     "你是 BunBird 企业协作助手，用清晰自然的中文回答。"
@@ -81,7 +82,7 @@ def messages(job: dict) -> list[dict]:
         ]
         budget -= size
     return [
-        {"role": "system", "content": SYSTEM},
+        {"role": "system", "content": SYSTEM + "\n" + reply_style(job)},
         *history,
         {"role": "user", "content": job["prompt"]},
     ]

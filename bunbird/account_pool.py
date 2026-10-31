@@ -80,16 +80,18 @@ class AccountExecutor:
                         executor.delegation_url = (
                             f"{self.control.url}/internal/delegation/tasks/{job['taskId']}/"
                         )
+                    current = {
+                        **job,
+                        "skills": skills,
+                        "effort": profile.get("effort", "auto"),
+                        "replyStyle": profile.get("replyStyle", "concise"),
+                        "accountRetry": bool(failed) or job.get("accountRetry", False),
+                    }
                     if hasattr(executor, "answer_with_progress"):
-                        current = {
-                            **job,
-                            "skills": skills,
-                            "accountRetry": bool(failed) or job.get("accountRetry", False),
-                        }
                         return await executor.answer_with_progress(current, forward)
                     from bunbird.worker import plain_answer
 
-                    return await plain_answer(executor, job, forward)
+                    return await plain_answer(executor, current, forward)
                 except ModelError as error:
                     if error.code not in ACCOUNT_ERRORS:
                         raise

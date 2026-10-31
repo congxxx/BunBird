@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
 
+from bunbird.session_cards import completion_card
+
 
 def card(text, finished=False, failed=False, delegations=None, model=""):
     content = {
@@ -236,7 +238,9 @@ class ProgressCards:
         response = self.patch(
             row[0],
             json.dumps(
-                card(
+                completion_card(delivery["summary"], delivery.get("delegations"))
+                if delivery.get("summary")
+                else card(
                     text,
                     finished=True,
                     failed=state != "SUCCEEDED",

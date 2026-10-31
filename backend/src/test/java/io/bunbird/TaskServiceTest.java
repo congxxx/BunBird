@@ -99,6 +99,35 @@ class TaskServiceTest {
         assertThatThrownBy(()->service.beginDelegation(id,lease,"late",profile)).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
         assertThatThrownBy(()->service.finishDelegation(id,lease,result)).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
     }
+    @Test void completionControlsAreOwnerScopedAndSnapshotNextTaskSettings() {
+        String id=submit("controls","owner","controls-topic","hello");var job=service.claim();
+        db.update("UPDATE task SET executor_kind='claude' WHERE id=?",id);
+        service.complete(id,success(job));queueCard(id);
+        var models=List.of(new AccountPool.ModelOption("backup","Backup","claude-sonnet-4-6"));
+        var modelAction=new Api.SessionAction(id,"owner","chat-test","card-"+id,"set_model","backup:claude-sonnet-4-6");
+        service.sessionAction(modelAction,models);
+        service.sessionAction(new Api.SessionAction(id,"owner","chat-test","card-"+id,"set_effort","high"),List.of());
+        service.sessionAction(new Api.SessionAction(id,"owner","chat-test","card-"+id,"set_style","professional"),List.of());
+        var next=submit("controls-next","owner","controls-topic","next");
+        assertThat(db.queryForMap("SELECT effort,reply_style,requested_model FROM task WHERE id=?",next))
+            .containsEntry("effort","high").containsEntry("reply_style","professional").containsEntry("requested_model","claude-sonnet-4-6");
+        String other=submit("controls-other","other","controls-topic","next");
+        assertThat(db.queryForMap("SELECT effort,reply_style FROM task WHERE id=?",other)).containsEntry("effort","auto").containsEntry("reply_style","concise");
+        assertThatThrownBy(()->service.sessionAction(new Api.SessionAction(id,"other","chat-test","card-"+id,"set_style","friendly"),List.of())).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->service.sessionAction(new Api.SessionAction(id,"owner","wrong-chat","card-"+id,"help",null),List.of())).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->service.sessionAction(new Api.SessionAction(id,"owner","chat-test","forged","help",null),List.of())).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThatThrownBy(()->service.sessionAction(new Api.SessionAction(id,"owner","chat-test","card-"+id,"set_effort","xhigh"),List.of())).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThat(SessionControls.effortLevels("MiniMax-M3")).containsExactly("auto");
+        assertThat(SessionControls.effortLevels("deepseek-chat")).containsExactly("auto");
+        assertThat(SessionControls.summary(db,id)).containsEntry("style","concise");
+        db.update("UPDATE task SET usage_json=? WHERE id=?","{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":20,\"bunbird_tool_calls\":3}",id);
+        assertThat(SessionControls.summary(db,id)).containsEntry("tokens",35L).containsEntry("sessionTokens",35L).containsEntry("toolCalls",3L);
+        db.update("UPDATE task SET usage_json=? WHERE id=?","{\"bunbird_tool_calls\":2}",id);
+        assertThat(SessionControls.summary(db,id)).containsEntry("tokens",null).containsEntry("toolCalls",2L);
+        var auto=service.sessionAction(new Api.SessionAction(id,"owner","chat-test","card-"+id,"set_model","auto"),models);
+        assertThat(auto).containsEntry("selectedModel","账号池自动选择");
+        assertThat(service.sessionAction(new Api.SessionAction(id,"owner","chat-test","card-"+id,"effort",null),List.of())).containsEntry("effortLevels",List.of("auto"));
+    }
 
     @Test void repeatedEventsAndDifferentEventIdsForSameMessageCreateOneTask() throws Exception {
         var incoming=message("event","user","topic","你好");
@@ -480,6 +509,18 @@ class TaskServiceTest {
         service.assignAccount(task,(String)job.get("leaseToken"),backup,QuotaAdmission.allow());
         assertThat(db.queryForObject("SELECT COUNT(*) FROM delivery WHERE task_id=? AND content LIKE '%Backup / backup-model%'",Integer.class,task)).isEqualTo(1);
         assertThat(service.task(task).get("requested_model")).isEqualTo("chosen-model");
+    }
+
+    @Test void fallbackResetsEffortUnsupportedByActualModelOrExecutor() {
+        String id=submit("effort-fallback","user","topic","hello");var job=service.claim();
+        db.update("UPDATE task SET effort='xhigh' WHERE id=?",id);
+        var account=Map.<String,Object>of("id","backup","name","Backup","model","claude-sonnet-4-6","executor","claude");
+        var selected=service.assignAccount(id,(String)job.get("leaseToken"),account,QuotaAdmission.allow());
+        assertThat(selected).containsEntry("effort","auto");
+        assertThat(db.queryForMap("SELECT effort,executor_kind FROM task WHERE id=?",id)).containsEntry("effort","auto").containsEntry("executor_kind","claude");
+        db.update("UPDATE task SET effort='high' WHERE id=?",id);
+        var plain=new HashMap<>(account);plain.put("executor","model");
+        assertThat(service.assignAccount(id,(String)job.get("leaseToken"),plain,QuotaAdmission.allow())).containsEntry("effort","auto");
     }
 
     @Test void accountSelectionIsLeaseBoundAndAllFailedTasksWait() throws Exception {

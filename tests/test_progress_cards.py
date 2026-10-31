@@ -73,14 +73,27 @@ def test_progress_reuses_message_after_restart_and_closes_once(tmp_path):
     cards.update(
         {**delivery, "deliveryId": "next", "content": "正在分析\n正在读取文件"}, build_reply
     )
-    cards.finish({**delivery, "taskState": "SUCCEEDED"})
+    cards.finish(
+        {
+            **delivery,
+            "taskState": "SUCCEEDED",
+            "summary": {
+                "taskId": "task",
+                "status": "SUCCEEDED",
+                "model": "test",
+                "tokens": 123,
+                "executor": "claude",
+            },
+        }
+    )
     cards.finish({**delivery, "taskState": "SUCCEEDED"})
     cards.update(delivery, build_reply)
     assert len(replies) == 1 and len(patches) == 2
     assert all(p.message_id == "om-progress" for p in patches)
     final = json.loads(patches[-1].request_body.content)
     assert final["header"]["template"] == "green"
-    assert "最终结论见下方消息" in final["elements"][0]["text"]["content"]
+    assert final["header"]["title"]["content"] == "✅ Claude Code · 运行结束"
+    assert len(final["elements"][-1]["actions"]) == 5
     assert json.loads(replies[0].request_body.content)["config"]["update_multi"]
     assert replies[0].request_body.reply_in_thread
     cards.close()

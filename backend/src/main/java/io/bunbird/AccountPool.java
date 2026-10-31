@@ -58,6 +58,18 @@ public class AccountPool {
                 .distinct().map(model->new ModelOption(p.id(),p.name(),model)).toList(),3,java.util.concurrent.TimeUnit.SECONDS)).toList();
         return futures.stream().flatMap(f->f.join().stream()).toList();
     }
+    public List<ModelOption> quickModelOptions() {
+        var view=view();var result=new ArrayList<ModelOption>();
+        for(var p:view.profiles()) {
+            if(!p.enabled() || view.missing().contains(p.id()))continue;
+            if(db.queryForObject("SELECT COUNT(*) FROM account_state WHERE id=? AND disabled=TRUE",Integer.class,p.id())>0)continue;
+            var names=new LinkedHashSet<String>();names.add(p.model());names.addAll(p.modelMapping().values());
+            var cached=modelCatalog.get(p.id());
+            if(cached!=null && cached.profile().equals(p) && cached.expires()>System.currentTimeMillis())names.addAll(cached.models());
+            names.stream().limit(50).forEach(name->result.add(new ModelOption(p.id(),p.name(),name)));
+        }
+        return result;
+    }
 
     public AccountPool(Environment env,ObjectMapper json,JdbcTemplate db,QuotaService defaultQuota) {
         this.db=db; this.json=json; this.vault=new AccountVault(env);

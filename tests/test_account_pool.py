@@ -147,7 +147,13 @@ def test_switch_preserves_job_and_uses_unique_progress(monkeypatch, waiting):
             asyncio.run(executor.answer_with_progress(job, progress))
     else:
         assert asyncio.run(executor.answer_with_progress(job, progress))["result"] == "done"
-        assert jobs[1] == {**job, "accountRetry": True, "skills": []}
+        assert jobs[1] == {
+            **job,
+            "accountRetry": True,
+            "skills": [],
+            "effort": "auto",
+            "replyStyle": "concise",
+        }
     assert len(notices) == len(set(notices)) and notices[0] == "UPDATE_9"
 
 

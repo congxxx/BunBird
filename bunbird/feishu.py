@@ -15,6 +15,7 @@ from bunbird.control import client
 from bunbird.inbox import Inbox
 from bunbird.progress_cards import ProgressCards, success
 from bunbird.reactions import Reactions
+from bunbird.session_cards import completion_card
 
 log = logging.getLogger(__name__)
 
@@ -315,7 +316,7 @@ class Bridge:
         header, event = payload.get("header", {}), payload.get("event", {})
         operator, context = event.get("operator") or {}, event.get("context") or {}
         value = (event.get("action") or {}).get("value") or {}
-        message = "无法操作这张排队卡片。"
+        message = "无法操作这张会话卡片。"
         kind = "error"
         if (
             header.get("app_id") == self.config.app_id
@@ -325,7 +326,19 @@ class Bridge:
             and context.get("open_message_id")
             and isinstance(value, dict)
             and isinstance(value.get("taskId"), str)
-            and value.get("action") in {"prioritize", "withdraw"}
+            and value.get("action")
+            in {
+                "prioritize",
+                "withdraw",
+                "model",
+                "effort",
+                "style",
+                "usage",
+                "help",
+                "set_model",
+                "set_effort",
+                "set_style",
+            }
             and (
                 not self.config.allowed_chats
                 or context["open_chat_id"] in self.config.allowed_chats
@@ -333,13 +346,20 @@ class Bridge:
         ):
             try:
                 response = self.http.post(
-                    "/internal/bridge/queue-action",
+                    "/internal/bridge/queue-action"
+                    if value["action"] in {"prioritize", "withdraw"}
+                    else "/internal/bridge/session-action",
                     json={
                         "taskId": value["taskId"],
                         "action": value["action"],
                         "senderId": operator["open_id"],
                         "chatId": context["open_chat_id"],
                         "messageId": context["open_message_id"],
+                        **(
+                            {"option": (event.get("action") or {}).get("option")}
+                            if value["action"].startswith("set_")
+                            else {}
+                        ),
                     },
                     timeout=2,
                 )
@@ -347,9 +367,24 @@ class Bridge:
                     message = "仅任务发起人可以操作。"
                 elif response.status_code == 409:
                     message = "卡片状态正在同步，请稍后重试。"
+                elif response.status_code == 400:
+                    message = "当前模型不支持该设置或选项已变化，请重新打开设置面板。"
                 else:
                     response.raise_for_status()
                     message, kind = response.json()["message"], "info"
+                    if response.json().get("summary"):
+                        result = response.json()
+                        return P2CardActionTriggerResponse(
+                            {
+                                "toast": {"type": "info", "content": message},
+                                "card": {
+                                    "type": "raw",
+                                    "data": completion_card(
+                                        result["summary"], result.get("delegations"), result
+                                    ),
+                                },
+                            }
+                        )
             except (httpx.HTTPError, ValueError, KeyError):
                 message = "暂未确认操作结果，请稍后重试；重复点击不会重复调整顺序。"
         return P2CardActionTriggerResponse({"toast": {"type": kind, "content": message}})
